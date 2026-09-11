@@ -38,11 +38,11 @@ if not os.path.exists(CREDENTIALS_FILE):
 
 st.set_page_config(page_title="Studio di Nutrizione - Dott. Rodolfo Casa", layout="wide", initial_sidebar_state="collapsed")
 
-# Stile CSS Interfaccia
+# Stile CSS Interfaccia (senza il box bianco di login)
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { display: none; }
-    .block-container { padding-top: 2.2rem !important; padding-bottom: 2.5rem; }
+    .block-container { padding-top: 2rem !important; padding-bottom: 2.5rem; max-width: 900px; }
     
     div[data-testid="stRadio"] > div {
         flex-direction: row;
@@ -81,16 +81,6 @@ st.markdown("""
     }
     .traffic-green { color: #15803D; background-color: #DCFCE7; padding: 4px 8px; border-radius: 6px; font-weight: 700; }
     .traffic-red { color: #B91C1C; background-color: #FEE2E2; padding: 4px 8px; border-radius: 6px; font-weight: 700; }
-    .login-box {
-        max-width: 450px;
-        margin: 20px auto;
-        padding: 30px;
-        background: #FFFFFF;
-        border-radius: 14px;
-        border: 1px solid #E2E8F0;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.06);
-        text-align: center;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -120,18 +110,18 @@ if "autenticato" not in st.session_state:
     st.session_state["utente_dati"] = None
 
 if not st.session_state["autenticato"]:
-    st.markdown("<div class='login-box'>", unsafe_allow_html=True)
-    
-    # Visualizzazione diretta del logo centrato
-    try:
-        st.image("logo.png", width=150)
-    except Exception:
-        pass
+    # Centriamo il logo perfettamente usando le colonne
+    c_spazio1, c_img, c_spazio2 = st.columns([2, 1.2, 2])
+    with c_img:
+        try:
+            st.image("logo.png", use_container_width=True)
+        except Exception:
+            pass
 
-    st.markdown("<h3 style='text-align:center; color:#1E3A8A; margin-bottom:0px;'>Dott. Rodolfo Casa</h3>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center; color:#2563EB; font-weight:600; font-size:0.95rem; margin-top:2px;'>Biologo Nutrizionista</p>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center; color:#64748B; font-size:0.85rem;'>Piattaforma Clinica & Portale Paziente</p>", unsafe_allow_html=True)
-    st.markdown("<hr style='margin:15px 0;'>", unsafe_allow_html=True)
+    st.markdown("<h2 style='text-align:center; color:#1E3A8A; margin-bottom:0px;'>Dott. Rodolfo Casa</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:#2563EB; font-weight:600; font-size:1rem; margin-top:2px;'>Biologo Nutrizionista</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:#64748B; font-size:0.9rem;'>Piattaforma Clinica & Portale Paziente</p>", unsafe_allow_html=True)
+    st.markdown("<hr style='margin:20px 0;'>", unsafe_allow_html=True)
     
     tab_log_admin, tab_log_paz = st.tabs(["🔐 Accesso Studio (Admin)", "👤 Area Paziente (CF)"])
     
@@ -172,7 +162,6 @@ if not st.session_state["autenticato"]:
                 else:
                     st.warning("Inserisci un Codice Fiscale valido.")
 
-    st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
 # -------------------------------------------------------------------------------------------------
