@@ -36,7 +36,7 @@ CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
 if not os.path.exists(CREDENTIALS_FILE):
     CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json.json")
 
-st.set_page_config(page_title="Studio Nutrizionale", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Studio di Nutrizione - Dott. Rodolfo Casa", layout="wide", initial_sidebar_state="collapsed")
 
 # Stile CSS Interfaccia
 st.markdown("""
@@ -83,7 +83,7 @@ st.markdown("""
     .traffic-red { color: #B91C1C; background-color: #FEE2E2; padding: 4px 8px; border-radius: 6px; font-weight: 700; }
     .login-box {
         max-width: 450px;
-        margin: 40px auto;
+        margin: 20px auto;
         padding: 30px;
         background: #FFFFFF;
         border-radius: 14px;
@@ -120,8 +120,19 @@ if "autenticato" not in st.session_state:
 
 if not st.session_state["autenticato"]:
     st.markdown("<div class='login-box'>", unsafe_allow_html=True)
-    st.markdown("<h2 style='text-align:center; color:#1E3A8A;'>🥗 Studio Nutrizionale</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center; color:#64748B; font-size:0.9rem;'>Piattaforma Clinica & Portale Paziente</p>", unsafe_allow_html=True)
+    
+    # Visualizzazione del Logo e del Nome Personalizzato
+    try:
+        col_l1, col_l2, col_l3 = st.columns([1, 2, 1])
+        with col_l2:
+            st.image("logo.png", use_container_width=True)
+    except Exception:
+        pass
+
+    st.markdown("<h3 style='text-align:center; color:#1E3A8A; margin-bottom:0px;'>Dott. Rodolfo Casa</h3>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:#2563EB; font-weight:600; font-size:0.95rem; margin-top:2px;'>Biologo Nutrizionista</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:#64748B; font-size:0.85rem;'>Piattaforma Clinica & Portale Paziente</p>", unsafe_allow_html=True)
+    st.markdown("<hr style='margin:15px 0;'>", unsafe_allow_html=True)
     
     tab_log_admin, tab_log_paz = st.tabs(["🔐 Accesso Studio (Admin)", "👤 Area Paziente (CF)"])
     
@@ -174,7 +185,7 @@ if st.session_state["ruolo"] == "paziente":
     c_p_title, c_p_out = st.columns([4, 1])
     with c_p_title:
         st.markdown(f"<h3 style='color:#1E3A8A;'>👋 Benvenuto/a, {paz['nome']} {paz['cognome']}</h3>", unsafe_allow_html=True)
-        st.caption("La tua area personale protetta - Studio di Nutrizione Clinica")
+        st.caption("La tua area personale protetta - Dott. Rodolfo Casa | Biologo Nutrizionista")
     with c_p_out:
         st.write("")
         if st.button("Esci", use_container_width=True):
