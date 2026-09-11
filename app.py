@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from fpdf import FPDF
 import streamlit.components.v1 as components
 
-# Google GenAI per l'elaborazione dell'anamnesi
+# Google GenAI per l'elaborazione dell'anamnesi e delle diete
 from google import genai
 from google.genai import types
 
@@ -106,7 +106,7 @@ def upload_pdf_su_storage(paziente_id, nome_file, pdf_bytes):
     except Exception:
         pass
 
-# Funzione per elaborare l'anamnesi con Gemini (aggiornata a gemini-3.6-flash)
+# Funzione IA per l'anamnesi pulita (senza asterischi, usa tag HTML <b> per il grassetto)
 def elabora_anamnesi_con_ia(note_grezze):
     if not GEMINI_API_KEY:
         return "⚠️ Chiave API Gemini non configurata nei secrets di Streamlit."
@@ -118,6 +118,8 @@ def elabora_anamnesi_con_ia(note_grezze):
         1. ANAMNESI PATOLOGICA E FARMACOLOGICA (patologie, interventi, farmaci, integratori assunti).
         2. ABITUDINI ALIMENTARI, STILE DI VITA E INTOLLERANZE (orari pasti, preferenze, allergie, attività fisica, fumo, alvo).
 
+        IMPORTANTE: Non usare mai asterischi (*). Per evidenziare i titoli o le etichette chiave, usa rigorosamente i tag HTML in grassetto come <b>Testo</b>.
+
         Appunti grezzi:
         {note_grezze}
         """
@@ -128,6 +130,46 @@ def elabora_anamnesi_con_ia(note_grezze):
         return response.text
     except Exception as e:
         return f"Errore durante l'elaborazione con IA: {e}"
+
+# Funzione IA per analizzare un file di dieta e convertirlo in JSON strutturato per i template
+def analizza_dieta_file_con_ia(file_bytes, file_type, alimenti_disponibili):
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        # Gestione input file per Gemini
+        file_part = types.Part.from_bytes(data=file_bytes, mime_type=file_type)
+        
+        prompt = f"""
+        Sei un esperto nutrizionista e data analyst. Analizza questo documento contenente un piano alimentare.
+        Estrai la struttura della dieta per i giorni della settimana (Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica) e per i pasti (Colazione, Spuntino Mattina, Pranzo, Merenda Pomeriggio, Cena).
+        
+        Per ogni voce estratta, individua l'alimento corrispondente scegliendolo preferibilmente tra i nomi presenti in questo elenco ufficiale del catalogo dello studio:
+        {alimenti_disponibili}
+
+        Restituisci il risultato ESCLUSIVAMENTE in formato JSON puro strutturato in questo modo, senza aggiungere altro testo prima o dopo:
+        [
+          {{"giorno": "Lunedì", "pasto": "Colazione", "alimento": "Nome Alimento", "grammi": 150}},
+          {{"giorno": "Lunedì", "pasto": "Pranzo", "alimento": "Nome Alimento", "grammi": 80}}
+        ]
+        """
+        response = client.models.generate_content(
+            model='gemini-3.6-flash',
+            contents=[file_part, prompt],
+        )
+        
+        # Pulizia della risposta per estrarre il blocco JSON
+        testo_resp = response.text.strip()
+        if "```json" in testo_resp:
+            testo_resp = testo_resp.split("```json")[1].split("```")[0].strip()
+        elif "```" in testo_resp:
+            testo_resp = testo_resp.split("```")[1].split("```")[0].strip()
+            
+        return json.loads(testo_resp)
+    except Exception as e:
+        st.error(f"Errore analisi file con IA: {e}")
+        return None
 
 # -------------------------------------------------------------------------------------------------
 # CONTROLLO SESSIONE & GATEWAY DI LOGIN / PORTALE PAZIENTE
@@ -464,25 +506,31 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
         ])
         with tab_scheda:
             st.markdown("#### ✨ Assistente IA per Trascrizione & Strutturazione Anamnesi")
-            st.info("💡 **Come usarlo:** Dettate i vostri appunti veloci o incollate il testo grezzo del colloquio qui sotto. L'IA compilerà e formatterà automaticamente i campi clinici.")
+            st.info("💡 **Come usarlo:** Dettate i vostri appunti veloci o incollate il testo grezzo del colloquio. L'IA compilerà e salverà in automatico una nota pulita in grassetto (senza asterischi).")
             
             with st.form("form_ia_anamnesi"):
-                appunti_grezzi_ia = st.text_area("Note grezze del colloquio / Trascrizione vocale:", placeholder="Es: Paziente riferisce gastrite cronica, prende lucen 20mg. Lavora in ufficio, salta la colazione, mangia molta pasta la sera, intollerante al lattosio...")
-                btn_genera_ia = st.form_submit_button("✨ Elabora con Intelligenza Artificiale", type="primary")
+                appunti_grezzi_ia = st.text_area("Note grezze del colloquio / Trascrizione vocale:", placeholder="Es: Paziente riferisce gastrite cronica, prende lucen 20mg. Lavora in ufficio, salta la colazione...")
+                btn_genera_ia = st.form_submit_button("✨ Elabora e Salva in Automatico", type="primary")
 
             if btn_genera_ia and appunti_grezzi_ia.strip():
-                with st.spinner("L'intelligenza artificiale sta elaborando l'anamnesi..."):
-                    risultato_ia = elabora_anamnesi_con_ia(appunti_grezzi_ia)
-                    st.session_state["ia_risultato_temp"] = risultato_ia
-
-            if "ia_risultato_temp" in st.session_state:
-                st.success("Elaborazione completata!")
-                st.text_area("Risultato strutturato dall'IA:", value=st.session_state["ia_risultato_temp"], height=150)
+                with st.spinner("L'intelligenza artificiale sta elaborando e salvando l'anamnesi..."):
+                    testo_pulito_ia = elabora_anamnesi_con_ia(appunti_grezzi_ia)
+                    
+                    # Salvataggio automatico nelle note di visita del paziente
+                    nota_esistente = p_sel.get("note_visita") or ""
+                    nuova_nota_unificata = f"{nota_esistente}\n\n--- ANAMNESI IA ({date.today()}) ---\n{testo_pulito_ia}".strip()
+                    
+                    supabase.table("pazienti").update({
+                        "note_visita": nuova_nota_unificata
+                    }).eq("id", p_sel["id"]).execute()
+                    
+                    st.success("Anamnesi elaborata e allegata in automatico al profilo del paziente!")
+                    st.rerun()
 
             st.markdown("---")
             ca1, ca2 = st.columns(2)
             with ca1: up_pat = st.text_area("Anamnesi Patologica & Farmaci", value=p_sel.get("anamnesi_generale") or "", height=140, key=f"up_pat_{p_sel['id']}")
-            with ca2: up_alim = st.text_area("Anamnesi Alimentare & Intolleranze", value=p_sel.get("anamnesi_alimentare") or "", height=140, key=f"up_alim_{p_sel['id']}")
+            with ca2: up_alim = st.text_area("Abitudini Alimentari & Intolleranze", value=p_sel.get("anamnesi_alimentare") or "", height=140, key=f"up_alim_{p_sel['id']}")
             
             c_ob_up, _ = st.columns(2)
             with c_ob_up:
@@ -490,7 +538,7 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
                 idx_ob = ["Dimagrimento / Ricomposizione", "Aumento Massa Muscolare", "Nutrizione Clinica / Patologie", "Mantenimento / Rieducazione"].index(curr_ob) if curr_ob in ["Dimagrimento / Ricomposizione", "Aumento Massa Muscolare", "Nutrizione Clinica / Patologie", "Mantenimento / Rieducazione"] else 0
                 up_ob = st.selectbox("Obiettivo Primario:", ["Dimagrimento / Ricomposizione", "Aumento Massa Muscolare", "Nutrizione Clinica / Patologie", "Mantenimento / Rieducazione"], index=idx_ob, key=f"up_ob_{p_sel['id']}")
 
-            up_note = st.text_area("Note di Visita & Obiettivi", value=p_sel.get("note_visita") or "", height=80, key=f"up_note_{p_sel['id']}")
+            up_note = st.text_area("Note di Visita & Obiettivi", value=p_sel.get("note_visita") or "", height=120, key=f"up_note_{p_sel['id']}")
             if st.button("💾 Salva Modifiche Cartella", type="primary", key=f"btn_save_{p_sel['id']}"):
                 supabase.table("pazienti").update({
                     "anamnesi_generale": up_pat, "anamnesi_alimentare": up_alim, "note_visita": up_note, "obiettivo_clinico": up_ob
@@ -891,9 +939,80 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
                 st.warning("Per scaricare il modulo è necessario confermare l'accettazione.")
 
 # -------------------------------------------------------------------------------------------------
-# 2. PIANO SETTIMANALE & TEMPLATE
+# 2. PIANO SETTIMANALE & TEMPLATE (CON CARICAMENTO IA DA FILE)
 # -------------------------------------------------------------------------------------------------
 elif scelta_menu == "🥗 Piano Settimanale & Template":
+    st.subheader("🥗 Gestione Piani Nutrizionali & Importazione IA da File")
+    
+    # Sezione Caricamento Dieta con IA per creare Template
+    with st.expander("✨ Importa Dieta da File (PDF / Immagine) e Converti in Template con IA"):
+        st.info("Carica un documento o un'immagine di una vecchia dieta: l'intelligenza artificiale estrarrà la struttura e creerà un nuovo Template pronto all'uso.")
+        file_dieta_caricato = st.file_uploader("Seleziona file dieta (PDF, Immagine PNG/JPG):", type=["pdf", "png", "jpg", "jpeg"])
+        nome_nuovo_template_ia = st.text_input("Nome da assegnare al nuovo Template:", placeholder="Es: Dieta Chetogenica 1500 kcal")
+        
+        if st.button("🚀 Estrai e Salva come Template", type="primary"):
+            if file_dieta_caricato and nome_nuovo_template_ia.strip():
+                with st.spinner("L'intelligenza artificiale sta analizzando il file e strutturando la dieta..."):
+                    try:
+                        # Recupero elenco alimenti dal DB per guidare l'IA
+                        res_alimenti_db = supabase.table("alimenti").select("id, nome").execute()
+                        alimenti_db = res_alimenti_db.data or []
+                        dict_nomi_alimenti = {a["nome"].lower(): a["id"] for a in alimenti_db}
+                        lista_nomi_str = ", ".join([a["nome"] for a in alimenti_db])
+
+                        bytes_file = file_dieta_caricato.getvalue()
+                        mime_t = file_dieta_caricato.type
+
+                        dati_estratti = analizza_dieta_file_con_ia(bytes_file, mime_t, lista_nomi_str)
+
+                        if dati_estratti:
+                            # Creazione del Template principale
+                            nuovo_tpl = supabase.table("template_diete").insert({
+                                "nome": nome_nuovo_template_ia.strip(),
+                                "descrizione": "Importato automaticamente tramite IA",
+                                "target_kcal": 2000.0
+                            }).execute().data[0]
+                            tpl_id = nuovo_tpl["id"]
+
+                            inserimenti_ok = 0
+                            for voce in dati_estratti:
+                                nome_alim_estratto = voce.get("alimento", "").strip().lower()
+                                grammi_val = float(voce.get("grammi", 100))
+                                giorno_val = voce.get("giorno", "Lunedì")
+                                pasto_val = voce.get("pasto", "Pranzo")
+
+                                # Ricerca alimento corrispondente nel DB (matching esatto o parziale)
+                                alim_id_trovato = None
+                                for nom_db, aid in dict_nomi_alimenti.items():
+                                    if nome_alim_estratto in nom_db or nom_db in nome_alim_estratto:
+                                        alim_id_trovato = aid
+                                        break
+                                
+                                # Se non trovato, prende il primo alimento disponibile come fallback
+                                if not alim_id_trovato and alimenti_db:
+                                    alim_id_trovato = alimenti_db[0]["id"]
+
+                                if alim_id_trovato:
+                                    supabase.table("template_voci_dieta").insert({
+                                        "template_id": tpl_id,
+                                        "giorno_settimana": giorno_val,
+                                        "pasto": pasto_val,
+                                        "alimento_id": alim_id_trovato,
+                                        "grammi": grammi_val
+                                    }).execute()
+                                    inserimenti_ok += 1
+
+                            st.success(f"Template '{nome_nuovo_template_ia}' creato con successo ({inserimenti_ok} voci importate)!")
+                            st.rerun()
+                        else:
+                            st.error("L'IA non è riuscita a estrarre i dati dal file. Riprova con un file più chiaro.")
+                    except Exception as err_upl:
+                        st.error(f"Errore durante l'importazione: {err_upl}")
+            else:
+                st.warning("Carica un file e inserisci il nome del template.")
+
+    st.markdown("---")
+
     res_paz = supabase.table("pazienti").select("id, nome, cognome, codice_fiscale").order("cognome").execute()
     pazienti = res_paz.data or []
     if not pazienti:
