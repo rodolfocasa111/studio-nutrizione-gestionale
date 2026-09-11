@@ -106,7 +106,7 @@ def upload_pdf_su_storage(paziente_id, nome_file, pdf_bytes):
     except Exception:
         pass
 
-# Funzione per elaborare l'anamnesi con Gemini
+# Funzione per elaborare l'anamnesi con Gemini (aggiornata a gemini-2.0-flash)
 def elabora_anamnesi_con_ia(note_grezze):
     if not GEMINI_API_KEY:
         return "⚠️ Chiave API Gemini non configurata nei secrets di Streamlit."
@@ -114,7 +114,7 @@ def elabora_anamnesi_con_ia(note_grezze):
         client = genai.Client(api_key=GEMINI_API_KEY)
         prompt = f"""
         Sei un assistente medico per uno studio di nutrizione clinica. 
-        Analizza i seguenti appunti grezzi presi durante il colloquio con il paziente (che possono provenire da una trascrizione vocale o note veloci) e riorganizzali in modo professionale e strutturato in due sezioni precise:
+        Analizza i seguenti appunti grezzi presi durante il colloquio con il paziente e riorganizzali in modo professionale e strutturato in due sezioni precise:
         1. ANAMNESI PATOLOGICA E FARMACOLOGICA (patologie, interventi, farmaci, integratori assunti).
         2. ABITUDINI ALIMENTARI, STILE DI VITA E INTOLLERANZE (orari pasti, preferenze, allergie, attività fisica, fumo, alvo).
 
@@ -122,7 +122,7 @@ def elabora_anamnesi_con_ia(note_grezze):
         {note_grezze}
         """
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.0-flash',
             contents=prompt,
         )
         return response.text
