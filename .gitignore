@@ -1,0 +1,8 @@
+# Cartelle e file sensibili o locali
+.streamlit/secrets.toml
+credentials.json
+credentials.json.json
+.vscode/
+__pycache__/
+*.pyc
+.env
