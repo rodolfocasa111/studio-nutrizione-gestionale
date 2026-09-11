@@ -11,6 +11,10 @@ import matplotlib.pyplot as plt
 from fpdf import FPDF
 import streamlit.components.v1 as components
 
+# Google GenAI per l'elaborazione dell'anamnesi
+from google import genai
+from google.genai import types
+
 # Google Calendar API
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -28,6 +32,9 @@ SUPABASE_URL = get_secret("supabase", "url", "https://dknyvopqymopodskjmdf.supab
 SUPABASE_KEY = get_secret("supabase", "key", "sb_publishable_sejaZUC9Yy6Q-DKV6SOIYA_e6VkPyco")
 CALENDAR_ID = get_secret("google", "calendar_id", "rodolfocasa22@gmail.com")
 
+# Recupero della chiave API di Gemini dai secrets (o usa una stringa di fallback se testi locale)
+GEMINI_API_KEY = get_secret("gemini", "api_key", "")
+
 ADMIN_USER = str(get_secret("auth", "admin_user", "dott.casa")).strip().lower()
 ADMIN_PWD = str(get_secret("auth", "admin_password", "Studio2026!")).strip()
 
@@ -38,7 +45,7 @@ if not os.path.exists(CREDENTIALS_FILE):
 
 st.set_page_config(page_title="Studio di Nutrizione - Dott. Rodolfo Casa", layout="wide", initial_sidebar_state="collapsed")
 
-# Stile CSS Interfaccia (senza il box bianco di login)
+# Stile CSS Interfaccia
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { display: none; }
@@ -101,6 +108,29 @@ def upload_pdf_su_storage(paziente_id, nome_file, pdf_bytes):
     except Exception:
         pass
 
+# Funzione per elaborare l'anamnesi con Gemini
+def elabora_anamnesi_con_ia(note_grezze):
+    if not GEMINI_API_KEY:
+        return "⚠️ Chiave API Gemini non configurata nei secrets di Streamlit."
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = f"""
+        Sei un assistente medico per uno studio di nutrizione clinica. 
+        Analizza i seguenti appunti grezzi presi durante il colloquio con il paziente (che possono provenire da una trascrizione vocale o note veloci) e riorganizzali in modo professionale e strutturato in due sezioni precise:
+        1. ANAMNESI PATOLOGICA E FARMACOLOGICA (patologie, interventi, farmaci, integratori assunti).
+        2. ABITUDINI ALIMENTARI, STILE DI VITA E INTOLLERANZE (orari pasti, preferenze, allergie, attività fisica, fumo, alvo).
+
+        Appunti grezzi:
+        {note_grezze}
+        """
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
+        return response.text
+    except Exception as e:
+        return f"Errore durante l'elaborazione con IA: {e}"
+
 # -------------------------------------------------------------------------------------------------
 # CONTROLLO SESSIONE & GATEWAY DI LOGIN / PORTALE PAZIENTE
 # -------------------------------------------------------------------------------------------------
@@ -110,7 +140,6 @@ if "autenticato" not in st.session_state:
     st.session_state["utente_dati"] = None
 
 if not st.session_state["autenticato"]:
-    # Centriamo il logo perfettamente usando le colonne
     c_spazio1, c_img, c_spazio2 = st.columns([2, 1.2, 2])
     with c_img:
         try:
@@ -436,6 +465,23 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
             "📑 Consenso Informato & Privacy GDPR"
         ])
         with tab_scheda:
+            st.markdown("#### ✨ Assistente IA per Trascrizione & Strutturazione Anamnesi")
+            st.info("💡 **Come usarlo:** Dettate i vostri appunti veloci o incollate il testo grezzo del colloquio qui sotto. L'IA compilerà e formatterà automaticamente i campi clinici.")
+            
+            with st.form("form_ia_anamnesi"):
+                appunti_grezzi_ia = st.text_area("Note grezze del colloquio / Trascrizione vocale:", placeholder="Es: Paziente riferisce gastrite cronica, prende lucen 20mg. Lavora in ufficio, salta la colazione, mangia molta pasta la sera, intollerante al lattosio...")
+                btn_genera_ia = st.form_submit_button("✨ Elabora con Intelligenza Artificiale", type="primary")
+
+            if btn_genera_ia and appunti_grezzi_ia.strip():
+                with st.spinner("L'intelligenza artificiale sta elaborando l'anamnesi..."):
+                    risultato_ia = elabora_anamnesi_con_ia(appunti_grezzi_ia)
+                    st.session_state["ia_risultato_temp"] = risultato_ia
+
+            if "ia_risultato_temp" in st.session_state:
+                st.success("Elaborazione completata!")
+                st.text_area("Risultato strutturato dall'IA:", value=st.session_state["ia_risultato_temp"], height=150)
+
+            st.markdown("---")
             ca1, ca2 = st.columns(2)
             with ca1: up_pat = st.text_area("Anamnesi Patologica & Farmaci", value=p_sel.get("anamnesi_generale") or "", height=140, key=f"up_pat_{p_sel['id']}")
             with ca2: up_alim = st.text_area("Anamnesi Alimentare & Intolleranze", value=p_sel.get("anamnesi_alimentare") or "", height=140, key=f"up_alim_{p_sel['id']}")
