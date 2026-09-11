@@ -89,6 +89,7 @@ st.markdown("""
         border-radius: 14px;
         border: 1px solid #E2E8F0;
         box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+        text-align: center;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -121,11 +122,9 @@ if "autenticato" not in st.session_state:
 if not st.session_state["autenticato"]:
     st.markdown("<div class='login-box'>", unsafe_allow_html=True)
     
-    # Visualizzazione del Logo e del Nome Personalizzato
+    # Visualizzazione diretta del logo centrato
     try:
-        col_l1, col_l2, col_l3 = st.columns([1, 2, 1])
-        with col_l2:
-            st.image("logo.png", use_container_width=True)
+        st.image("logo.png", width=150)
     except Exception:
         pass
 
