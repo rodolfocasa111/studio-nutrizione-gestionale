@@ -106,7 +106,7 @@ def upload_pdf_su_storage(paziente_id, nome_file, pdf_bytes):
     except Exception:
         pass
 
-# Funzione per elaborare l'anamnesi con Gemini (aggiornata a gemini-1.5-flash)
+# Funzione per elaborare l'anamnesi con Gemini
 def elabora_anamnesi_con_ia(note_grezze):
     if not GEMINI_API_KEY:
         return "⚠️ Chiave API Gemini non configurata nei secrets di Streamlit."
@@ -850,7 +850,7 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
                 pdf.set_font("Helvetica", "B", 10)
                 pdf.cell(w_utile, 6, "DATI DEL PAZIENTE:", new_x="LMARGIN", new_y="NEXT")
                 pdf.set_font("Helvetica", "", 9)
-                pdf.cell(w_utile, 5, f"Nome e Cognome: {paz_sel['cognome']} {p_sel['nome']}", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(w_utile, 5, f"Nome e Cognome: {p_sel['cognome']} {p_sel['nome']}", new_x="LMARGIN", new_y="NEXT")
                 pdf.cell(w_utile, 5, f"Codice Fiscale: {p_sel.get('codice_fiscale') or 'N/D'} | Data di Nascita: {p_sel.get('data_nascita') or 'N/D'}", new_x="LMARGIN", new_y="NEXT")
                 pdf.ln(4)
                 pdf.set_font("Helvetica", "B", 10)
@@ -1646,7 +1646,7 @@ elif scelta_menu == "💾 Backup & Dati Studio":
     col_bk1, col_bk2 = st.columns([1.5, 2])
     with col_bk1:
         st.write("")
-        st.download_button(d
+        st.download_button(
             label="📦 Scarica Archivio Backup Completo (.ZIP)",
             data=genera_archivio_backup(),
             file_name=f"Backup_Studio_Nutrizione_{date.today().strftime('%Y%m%d')}.zip",
