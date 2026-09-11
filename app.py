@@ -106,7 +106,7 @@ def upload_pdf_su_storage(paziente_id, nome_file, pdf_bytes):
     except Exception:
         pass
 
-# Funzione per elaborare l'anamnesi con Gemini (aggiornata a gemini-2.0-flash)
+# Funzione per elaborare l'anamnesi con Gemini (aggiornata a gemini-3.6-flash)
 def elabora_anamnesi_con_ia(note_grezze):
     if not GEMINI_API_KEY:
         return "⚠️ Chiave API Gemini non configurata nei secrets di Streamlit."
@@ -122,7 +122,7 @@ def elabora_anamnesi_con_ia(note_grezze):
         {note_grezze}
         """
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-3.6-flash',
             contents=prompt,
         )
         return response.text
