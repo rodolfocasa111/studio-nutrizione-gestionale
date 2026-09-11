@@ -31,8 +31,6 @@ def get_secret(sezione, chiave, default_val):
 SUPABASE_URL = get_secret("supabase", "url", "https://dknyvopqymopodskjmdf.supabase.co")
 SUPABASE_KEY = get_secret("supabase", "key", "sb_publishable_sejaZUC9Yy6Q-DKV6SOIYA_e6VkPyco")
 CALENDAR_ID = get_secret("google", "calendar_id", "rodolfocasa22@gmail.com")
-
-# Recupero della chiave API di Gemini dai secrets (o usa una stringa di fallback se testi locale)
 GEMINI_API_KEY = get_secret("gemini", "api_key", "")
 
 ADMIN_USER = str(get_secret("auth", "admin_user", "dott.casa")).strip().lower()
