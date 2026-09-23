@@ -57,7 +57,7 @@ supabase = init_supabase()
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { display: none; }
-    .block-container { padding-top: 1.5rem !important; padding-bottom: 2.5rem; }
+    .block-container { padding-top: 1.2rem !important; padding-bottom: 2.5rem; }
     header {visibility: hidden;}
     
     div[data-testid="stRadio"] > div {
@@ -136,7 +136,7 @@ if not st.session_state["autenticato"]:
         tab_paz, tab_med = st.tabs(["👤 Accesso Pazienti", "🩺 Area Medica"])
         
         with tab_paz:
-            st.info("Inserisci il tuo **Codice Fiscale** per scaricare la tua dieta e vedere i tuoi progressi.")
+            st.info("Inserisci il tuo **Codice Fiscale** per consultare la tua dieta e monitorare i tuoi progressi.")
             with st.form("form_login_paziente"):
                 cf_input = st.text_input("Codice Fiscale", placeholder="es. RSSMRA80A01H501U").strip().upper()
                 btn_paz = st.form_submit_button("Accedi al Tuo Portale", type="primary", use_container_width=True)
@@ -150,7 +150,7 @@ if not st.session_state["autenticato"]:
                             st.session_state["dati_paziente"] = res_paziente.data[0]
                             st.rerun()
                         else:
-                            st.error("Codice Fiscale non trovato. Contatta lo studio.")
+                            st.error("Codice Fiscale non trovato nell'archivio dello studio.")
                     else:
                         st.warning("Inserisci il Codice Fiscale.")
                         
@@ -207,7 +207,7 @@ TABELLA_SOSTITUZIONI = [
     {"Gruppo": "Grassi di Condimento", "Opzioni": "10g Olio Extravergine d'Oliva (1 cucchiaio) = 15g Frutta secca a guscio (noci/mandorle)"}
 ]
 
-# Funzione per generazione PDF (usata sia dal paziente che dal medico)
+# Funzione per generazione PDF Dieta
 def genera_pdf_dieta_comune(paziente, dieta, df_dieta):
     class PDFPianoCompleto(FPDF):
         def header(self):
@@ -229,7 +229,7 @@ def genera_pdf_dieta_comune(paziente, dieta, df_dieta):
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(w_utile, 5, f"Paziente: {paziente['cognome']} {paziente['nome']} | CF: {paziente.get('codice_fiscale') or 'N/D'}", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 8.5)
-    pdf.cell(w_utile, 5, f"Data Scaricamento: {date.today().strftime('%d/%m/%Y')} | Target: {dieta.get('target_kcal')} kcal | Acqua: {dieta.get('litri_acqua')} L/die", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(w_utile, 5, f"Data Rilascio: {date.today().strftime('%d/%m/%Y')} | Target: {dieta.get('target_kcal')} kcal | Acqua: {dieta.get('litri_acqua')} L/die", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
 
     for g in giorni_settimana:
@@ -275,12 +275,12 @@ def genera_pdf_dieta_comune(paziente, dieta, df_dieta):
     return bytes(pdf.output())
 
 # =================================================================================================
-# SEZIONE 1: PORTALE PAZIENTE (VISTA IN SOLA LETTURA)
+# SEZIONE 1: PORTALE PAZIENTE (VISTA RISERVATA)
 # =================================================================================================
 if st.session_state["ruolo"] == "paziente":
     paziente = st.session_state["dati_paziente"]
     st.subheader(f"👋 Benvenuto nel tuo Portale, {paziente['nome']}")
-    st.caption("Da qui puoi consultare la tua dieta, monitorare i progressi e scaricare i tuoi documenti.")
+    st.caption("Da qui puoi consultare la tua dieta settimanale, scaricare il documento PDF e monitorare i progressi.")
     
     tab_mia_dieta, tab_miei_progressi = st.tabs(["🥗 La Mia Dieta", "📈 I Miei Progressi"])
     
@@ -313,7 +313,7 @@ if st.session_state["ruolo"] == "paziente":
                     
             if not df_dieta_paz.empty:
                 st.markdown("### Anteprima Piano Settimanale")
-                giorni_presenti = df_dieta_paz["Giorno"].unique()
+                giorni_presenti = [g for g in giorni_settimana if g in df_dieta_paz["Giorno"].unique()]
                 schede_giorni = st.tabs(giorni_presenti)
                 for idx, g in enumerate(giorni_presenti):
                     with schede_giorni[idx]:
@@ -322,7 +322,7 @@ if st.session_state["ruolo"] == "paziente":
                             st.markdown(f"**🍽️ {p_nome.upper()}**")
                             sub_pasto = df_g[df_g["Pasto"] == p_nome]
                             for _, r_paz in sub_pasto.iterrows():
-                                st.write(f"- {r_paz['Alimento']}: **{r_paz['Grammi']}g**")
+                                st.write(f"- {r_paz['Alimento']}: **{r_paz['Grammi']}g** ({r_paz['Kcal']} Kcal)")
                         st.markdown("---")
         else:
             st.info("Nessuna dieta assegnata al momento.")
@@ -335,8 +335,12 @@ if st.session_state["ruolo"] == "paziente":
             st.markdown("### Il tuo andamento del Peso (Kg)")
             fig_p, ax_p = plt.subplots(figsize=(8, 3))
             ax_p.plot(df_m["data_rilevazione"], df_m["peso_kg"], marker='o', color='#2563EB', linewidth=2)
+            ax_p.set_title("Variazione Ponderale nel Tempo", fontweight='bold')
             ax_p.grid(True, linestyle='--', alpha=0.5)
             st.pyplot(fig_p)
+            
+            st.write("##### Storico Rilevazioni:")
+            st.dataframe(df_m[["data_rilevazione", "peso_kg", "circ_vita_cm", "circ_fianchi_cm"]], use_container_width=True)
         else:
             st.info("Non ci sono ancora misurazioni registrate per tracciare il tuo progresso.")
 
@@ -356,6 +360,50 @@ elif st.session_state["ruolo"] == "admin":
     ]
     scelta_menu = st.radio("", voci_menu, horizontal=True, label_visibility="collapsed")
     st.markdown("---")
+
+    def get_calendar_service():
+        percorso = CREDENTIALS_FILE
+        if not os.path.exists(percorso):
+            alt = os.path.join(BASE_DIR, "credentials.json.json")
+            if os.path.exists(alt): percorso = alt
+            else: return None
+        try:
+            scopes = ['https://www.googleapis.com/auth/calendar']
+            creds = service_account.Credentials.from_service_account_file(percorso, scopes=scopes)
+            return build('calendar', 'v3', credentials=creds)
+        except Exception:
+            return None
+
+    def crea_evento_calendar(titolo, data_str, descrizione=""):
+        service = get_calendar_service()
+        if not service: return None, "File credenziali non trovato"
+        try:
+            evento = {
+                'summary': titolo, 'description': descrizione,
+                'start': {'date': data_str}, 'end': {'date': data_str},
+                'reminders': {
+                    'useDefault': False,
+                    'overrides': [
+                        {'method': 'email', 'minutes': 43200},
+                        {'method': 'popup', 'minutes': 14400},
+                        {'method': 'popup', 'minutes': 7200},
+                    ],
+                },
+            }
+            res = service.events().insert(calendarId=CALENDAR_ID, body=evento).execute()
+            return res.get("id"), "Sincronizzato su Google Calendar!"
+        except Exception as e:
+            return None, f"Errore Calendar: {e}"
+
+    def elimina_evento_calendar(google_event_id):
+        if not google_event_id: return True, "Nessun ID Google associato"
+        service = get_calendar_service()
+        if not service: return False, "File credenziali mancante"
+        try:
+            service.events().delete(calendarId=CALENDAR_ID, eventId=google_event_id).execute()
+            return True, "Eliminato da Google Calendar"
+        except Exception as e:
+            return False, f"Errore Google Calendar: {e}"
 
     # -------------------------------------------------------------------------------------------------
     # 1. CARTELLA PAZIENTI (MEDICO)
@@ -566,7 +614,7 @@ elif st.session_state["ruolo"] == "admin":
                                     "circ_vita_cm": cvita, "circ_fianchi_cm": cfianchi, "circ_coscia_cm": ccoscia, "circ_braccio_cm": cbraccio,
                                     "massa_grassa_kg": fm_kg, "massa_grassa_perc": fm_p, "massa_magra_kg": ffm_kg, "massa_magra_perc": ffm_p,
                                     "acqua_totale_litri": tbw_lt, "angolo_fase": angolo_fase_val, "note": note_m
-                                }).execute()
+                            }).execute()
                                 st.success("Rilevazione e analisi BIA salvate!")
                                 st.rerun()
                             except Exception as err:
@@ -984,7 +1032,19 @@ elif st.session_state["ruolo"] == "admin":
                                     if not testo_file.strip():
                                         st.error("Il file risulta vuoto o non leggibile.")
                                     else:
-                                        model = genai.GenerativeModel('gemini-1.0-pro')
+                                        # Selezione dinamica del modello attivo
+                                        nome_modello = "gemini-1.5-flash-latest"
+                                        try:
+                                            modelli_disp = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                                            flash_match = [m for m in modelli_disp if "flash" in m]
+                                            if flash_match:
+                                                nome_modello = flash_match[0]
+                                            elif modelli_disp:
+                                                nome_modello = modelli_disp[0]
+                                        except Exception:
+                                            nome_modello = "gemini-1.5-flash-latest"
+                                            
+                                        model = genai.GenerativeModel(nome_modello)
                                         prompt_ia = (
                                             "Analizza il seguente testo estratto da un piano alimentare. "
                                             "Estrai i giorni della settimana (Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica), "
@@ -1130,7 +1190,7 @@ elif st.session_state["ruolo"] == "admin":
                             st.markdown(f"**Totale {g}:** `{df_g['Kcal'].sum():.0f} Kcal` | 🥩 P: `{df_g['Proteine'].sum():.1f}g` | 🍚 C: `{df_g['Carboidrati'].sum():.1f}g` | 🥑 G: `{df_g['Grassi'].sum():.1f}g`")
                         st.markdown("---")
 
-                        for p_nome in st.session_state["elenco_pasti"]:
+                        for p_nome in ["Colazione", "Spuntino Mattina", "Pranzo", "Merenda Pomeriggio", "Cena"]:
                             st.markdown(f"<div class='meal-card'><strong>🍽️ {p_nome.upper()}</strong></div>", unsafe_allow_html=True)
                             if not df_g.empty:
                                 sub_pasto = df_g[df_g["Pasto"] == p_nome]
