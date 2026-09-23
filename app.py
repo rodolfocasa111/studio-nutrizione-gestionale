@@ -1033,7 +1033,8 @@ elif st.session_state["ruolo"] == "admin":
                                     if not testo_file.strip():
                                         st.error("Il file risulta vuoto o non leggibile.")
                                     else:
-                                        model = genai.GenerativeModel('gemini-2.5-flash')
+                                        # Modello Gemini aggiornato supportato
+                                        model = genai.GenerativeModel('gemini-3.6-flash')
                                         prompt_ia = (
                                             "Analizza il seguente testo estratto da un piano alimentare. "
                                             "Estrai i giorni della settimana (Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica), "
@@ -1074,7 +1075,6 @@ elif st.session_state["ruolo"] == "admin":
                                                     elif isinstance(g_val, (int, float)):
                                                         grammi = float(g_val)
                                                     else:
-                                                        # Estrae solo i numeri dalla stringa (es: "150g" -> 150.0)
                                                         numeri = re.findall(r"[-+]?\d*\.\d+|\d+", str(g_val))
                                                         grammi = float(numeri[0]) if numeri else 100.0
                                                 except Exception:
@@ -1601,25 +1601,25 @@ elif st.session_state["ruolo"] == "admin":
                 mov_entrate = res_sts.data or []
             except Exception: mov_entrate = []
 
-            if mov_entrate:
-                righe_sts = []
-                for e in mov_entrate:
-                    cf_estratto = "NON INDICATO"
-                    if "CF:" in e["descrizione"]:
-                        cf_estratto = e["descrizione"].split("CF:")[1].replace(")", "").strip()
-                    righe_sts.append({
-                        "Data Emissione": e["data"],
-                        "Numero Fattura / Descrizione": e["descrizione"],
-                        "Codice Fiscale Paziente": cf_estratto,
-                        "Importo Totale (€)": e["importo"],
-                        "Pagamento Tracciato": "Sì" if e.get("metodo") != "Contanti" else "No",
-                        "Tipo Spesa": "SP (Spesa Sanitaria)"
-                    })
-                df_sts = pd.DataFrame(righe_sts)
-                st.dataframe(df_sts, use_container_width=True)
-                st.download_button("📥 Scarica Tracciato Spese Sistema TS (CSV)", df_sts.to_csv(index=False).encode('utf-8'), file_name=f"Tracciato_Sistema_TS_{date.today().year}.csv", mime="text/csv", type="primary")
-            else:
-                st.info("Nessuna fattura emessa registrata.")
+        if mov_entrate:
+            righe_sts = []
+            for e in mov_entrate:
+                cf_estratto = "NON INDICATO"
+                if "CF:" in e["descrizione"]:
+                    cf_estratto = e["descrizione"].split("CF:")[1].replace(")", "").strip()
+                righe_sts.append({
+                    "Data Emissione": e["data"],
+                    "Numero Fattura / Descrizione": e["descrizione"],
+                    "Codice Fiscale Paziente": cf_estratto,
+                    "Importo Totale (€)": e["importo"],
+                    "Pagamento Tracciato": "Sì" if e.get("metodo") != "Contanti" else "No",
+                    "Tipo Spesa": "SP (Spesa Sanitaria)"
+                })
+            df_sts = pd.DataFrame(righe_sts)
+            st.dataframe(df_sts, use_container_width=True)
+            st.download_button("📥 Scarica Tracciato Spese Sistema TS (CSV)", df_sts.to_csv(index=False).encode('utf-8'), file_name=f"Tracciato_Sistema_TS_{date.today().year}.csv", mime="text/csv", type="primary")
+        else:
+            st.info("Nessuna fattura emessa registrata.")
 
         with tab_registro:
             c_form, c_metriche = st.columns([1.1, 2.3])
