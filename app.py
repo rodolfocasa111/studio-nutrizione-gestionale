@@ -47,7 +47,7 @@ if not os.path.exists(CREDENTIALS_FILE):
 
 st.set_page_config(page_title="Studio Nutrizionale", layout="wide", initial_sidebar_state="collapsed")
 
-# Stile CSS Interfaccia Professionale Avanzato
+# Stile CSS Interfaccia
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { display: none; }
@@ -867,4 +867,727 @@ elif scelta_menu == "🥗 Piano Settimanale & Template":
                                     if "```json" in raw_text:
                                         raw_text = raw_text.split("```json")[1].split("```")[0].strip()
                                     elif "```" in raw_text:
-                                        raw_text = raw_text.split("
+                                        raw_text = raw_text.split("```")[1].split("```")[0].strip()
+                                    
+                                    dati_estratti = json.loads(raw_text)
+                                    
+                                    if dati_estratti:
+                                        nuovo_t_ai = supabase.table("template_diete").insert({
+                                            "nome": nome_gen_tpl.strip(), "descrizione": "Generato automaticamente con Gemini AI", "target_kcal": 2000.0
+                                        }).execute().data[0]
+                                        
+                                        res_al_all = supabase.table("alimenti").select("id, nome").execute().data or []
+                                        al_dict = {a["nome"].lower(): a["id"] for a in res_al_all}
+                                        
+                                        inseriti = 0
+                                        for item in dati_estratti:
+                                            alim_nome = item.get("alimento", "").strip().lower()
+                                            grammi = float(item.get("grammi", 100))
+                                            giorno = item.get("giorno", "Lunedì")
+                                            pasto = item.get("pasto", "Pranzo")
+                                            
+                                            match_id = None
+                                            for k, aid in al_dict.items():
+                                                if alim_nome in k or k in alim_nome:
+                                                    match_id = aid
+                                                    break
+                                            
+                                            if not match_id and res_al_all:
+                                                match_id = res_al_all[0]["id"]
+                                                
+                                            if match_id:
+                                                supabase.table("template_voci_dieta").insert({
+                                                    "template_id": nuovo_t_ai["id"],
+                                                    "giorno_settimana": giorno,
+                                                    "pasto": pasto,
+                                                    "alimento_id": match_id,
+                                                    "grammi": grammi
+                                                }).execute()
+                                                inseriti += 1
+                                                
+                                        st.success(f"Template '{nome_gen_tpl}' creato con successo ({inseriti} voci importate)!")
+                                        st.rerun()
+                                    else:
+                                        st.error("Gemini non ha restituito dati validi.")
+                            except Exception as e_ai:
+                                st.error(f"Errore durante l'elaborazione con Gemini: {e_ai}")
+                    else:
+                        st.warning("Carica un file e inserisci un nome per il template.")
+
+        with col_btn_pdf:
+            st.write("")
+            st.write("")
+            if not df_dieta.empty:
+                class PDFPianoCompleto(FPDF):
+                    def header(self):
+                        self.set_font('Helvetica', 'B', 14)
+                        self.cell(self.epw, 7, 'STUDIO DI NUTRIZIONE CLINICA', align='C', new_x="LMARGIN", new_y="NEXT")
+                        self.set_font('Helvetica', 'I', 9)
+                        self.cell(self.epw, 5, 'Piano Nutrizionale Personalizzato Settimanale', align='C', new_x="LMARGIN", new_y="NEXT")
+                        self.ln(3)
+                    def footer(self):
+                        self.set_y(-12)
+                        self.set_font('Helvetica', 'I', 8)
+                        self.cell(self.epw, 10, f'Pagina {self.page_no()}', align='C')
+
+                def genera_pdf_completo():
+                    pdf = PDFPianoCompleto()
+                    pdf.set_auto_page_break(auto=True, margin=12)
+                    pdf.add_page()
+                    w_utile = pdf.epw
+
+                    pdf.set_font("Helvetica", "B", 10)
+                    pdf.cell(w_utile, 5, f"Paziente: {paziente['cognome']} {paziente['nome']} | CF: {paziente.get('codice_fiscale') or 'N/D'}", new_x="LMARGIN", new_y="NEXT")
+                    pdf.set_font("Helvetica", "", 8.5)
+                    pdf.cell(w_utile, 5, f"Data Rilascio: {date.today().strftime('%d/%m/%Y')} | Target: {dieta.get('target_kcal')} kcal | Acqua: {dieta.get('litri_acqua')} L/die", new_x="LMARGIN", new_y="NEXT")
+                    pdf.ln(3)
+
+                    for g in giorni_settimana:
+                        sg = df_dieta[df_dieta["Giorno"] == g]
+                        if not sg.empty:
+                            pdf.set_font("Helvetica", "B", 9.5)
+                            pdf.set_fill_color(232, 240, 254)
+                            pdf.cell(w_utile, 5.5, f"  {g.upper()}", border=1, fill=True, new_x="LMARGIN", new_y="NEXT")
+                            for p in sg["Pasto"].unique():
+                                sp = sg[sg["Pasto"] == p]
+                                pdf.set_font("Helvetica", "B", 8.5)
+                                pdf.cell(w_utile, 4.5, f"    * {p}:", new_x="LMARGIN", new_y="NEXT")
+                                pdf.set_font("Helvetica", "", 8)
+                                for _, r in sp.iterrows():
+                                    pdf.cell(w_utile, 4, f"       - {r['Alimento']}: {r['Grammi']}g ({r['Kcal']} kcal | P:{r['Proteine']}g C:{r['Carboidrati']}g G:{r['Grassi']}g)", new_x="LMARGIN", new_y="NEXT")
+                            pdf.ln(1.5)
+
+                    pdf.add_page()
+                    if dieta.get("note_integrazione"):
+                        pdf.set_font("Helvetica", "B", 11)
+                        pdf.cell(w_utile, 6, "PIANO DI INTEGRAZIONE NUTRIZIONALE", new_x="LMARGIN", new_y="NEXT")
+                        pdf.set_font("Helvetica", "", 8.5)
+                        pdf.multi_cell(w_utile, 4.5, dieta.get("note_integrazione"), new_x="LMARGIN", new_y="NEXT")
+                        pdf.ln(3)
+
+                    pdf.set_font("Helvetica", "B", 11)
+                    pdf.cell(w_utile, 6, "GUIDA RAPIDA ALLE SOSTITUZIONI ALIMENTARI", new_x="LMARGIN", new_y="NEXT")
+                    for s in TABELLA_SOSTITUZIONI:
+                        pdf.set_font("Helvetica", "B", 8.5)
+                        pdf.cell(w_utile, 5, f"- {s['Gruppo']}:", new_x="LMARGIN", new_y="NEXT")
+                        pdf.set_font("Helvetica", "", 8)
+                        pdf.multi_cell(w_utile, 4.5, f"  {s['Opzioni']}", new_x="LMARGIN", new_y="NEXT")
+                        pdf.ln(1)
+
+                    pdf.ln(3)
+                    pdf.set_font("Helvetica", "B", 11)
+                    pdf.cell(w_utile, 6, "LISTA DELLA SPESA SETTIMANALE AGGREGATA", new_x="LMARGIN", new_y="NEXT")
+                    pdf.set_font("Helvetica", "", 8.5)
+                    spesa_agg = df_dieta.groupby("Alimento")["Grammi"].sum().reset_index().sort_values(by="Grammi", ascending=False)
+                    for _, r_sp in spesa_agg.iterrows():
+                        pdf.cell(w_utile, 4.5, f"  [ ] {r_sp['Alimento']}: {r_sp['Grammi']:.0f} g", new_x="LMARGIN", new_y="NEXT")
+                    return bytes(pdf.output())
+
+                st.download_button("📥 Scarica Piano & Spesa PDF", genera_pdf_completo(), file_name=f"Piano_Nutrizionale_{paziente['cognome']}.pdf", mime="application/pdf", type="primary", use_container_width=True)
+            else:
+                st.button("📥 Scarica Piano & Spesa PDF", disabled=True, use_container_width=True)
+
+        st.markdown("### 📊 Monitoraggio Semaforo: Target vs Reale Medio")
+        t_k = float(dieta.get("target_kcal") or 2000.0)
+        t_prot = float(dieta.get("target_proteine_g") or 130.0)
+        t_carb = float(dieta.get("target_carboidrati_g") or 220.0)
+        t_fat = float(dieta.get("target_grassi_g") or 60.0)
+
+        if not df_dieta.empty:
+            tot_kcal = df_dieta["Kcal"].sum()
+            tot_p = df_dieta["Proteine"].sum()
+            tot_c = df_dieta["Carboidrati"].sum()
+            tot_g = df_dieta["Grassi"].sum()
+            media_die = tot_kcal / 7.0
+            media_p = tot_p / 7.0
+            media_c = tot_c / 7.0
+            media_g = tot_g / 7.0
+
+            def check_diff(reale, target):
+                diff = reale - target
+                perc = abs(diff) / target if target > 0 else 0
+                cls = "traffic-green" if perc <= 0.08 else "traffic-red"
+                segno = "+" if diff > 0 else ""
+                return f"<span class='{cls}'>{reale:.0f} / {target:.0f} ({segno}{diff:.0f})</span>"
+
+            c_sem1, c_sem2, c_sem3, c_sem4 = st.columns(4)
+            with c_sem1: st.markdown(f"**Kcal Media/Die:**<br>{check_diff(media_die, t_k)}", unsafe_allow_html=True)
+            with c_sem2: st.markdown(f"**Proteine (g/die):**<br>{check_diff(media_p, t_prot)}", unsafe_allow_html=True)
+            with c_sem3: st.markdown(f"**Carboidrati (g/die):**<br>{check_diff(media_c, t_carb)}", unsafe_allow_html=True)
+            with c_sem4: st.markdown(f"**Grassi (g/die):**<br>{check_diff(media_g, t_fat)}", unsafe_allow_html=True)
+
+            col_g1, col_g2 = st.columns(2)
+            with col_g1:
+                fig1, ax1 = plt.subplots(figsize=(4.5, 2.0))
+                vals = [tot_c * 4, tot_p * 4, tot_g * 9]
+                if sum(vals) > 0:
+                    ax1.pie(vals, labels=['Carboidrati', 'Proteine', 'Grassi'], autopct='%1.1f%%', startangle=90, colors=['#3B82F6', '#10B981', '#F59E0B'])
+                    ax1.axis('equal')
+                    st.write("**Ripartizione Macro (%)**")
+                    st.pyplot(fig1)
+            with col_g2:
+                fig2, ax2 = plt.subplots(figsize=(4.5, 2.0))
+                k_giorni = [df_dieta[df_dieta["Giorno"] == g]["Kcal"].sum() for g in giorni_settimana]
+                ax2.bar([g[:3] for g in giorni_settimana], k_giorni, color="#6366F1")
+                ax2.axhline(t_k, color='red', linestyle='--', label=f'Target ({t_k:.0f} kcal)')
+                ax2.set_ylabel("Kcal")
+                ax2.legend()
+                st.write("**Kcal per Giorno vs Target**")
+                st.pyplot(fig2)
+        else:
+            st.info("Nessun alimento inserito.")
+
+        st.markdown("---")
+        tab_piano_visivo, tab_spesa_visiva, tab_sostituzioni_visiva = st.tabs(["🗓️ Menu Settimanale", "🛒 Lista Spesa Automatica", "🔄 Guida Sostituzioni"])
+        with tab_spesa_visiva:
+            if not df_dieta.empty:
+                df_spesa = df_dieta.groupby("Alimento")["Grammi"].sum().reset_index().sort_values(by="Grammi", ascending=False)
+                df_spesa.columns = ["Alimento da Acquistare", "Quantità Totale (g)"]
+                st.dataframe(df_spesa, use_container_width=True)
+            else:
+                st.info("Aggiungi alimenti al menu.")
+
+        with tab_sostituzioni_visiva:
+            for s in TABELLA_SOSTITUZIONI:
+                with st.expander(f"📌 {s['Gruppo']}"):
+                    st.write(s["Opzioni"])
+
+        with tab_piano_visivo:
+            schede = st.tabs(giorni_settimana)
+            for idx, g in enumerate(giorni_settimana):
+                with schede[idx]:
+                    df_g = df_dieta[df_dieta["Giorno"] == g] if not df_dieta.empty else pd.DataFrame()
+                    if not df_g.empty:
+                        st.markdown(f"**Totale {g}:** `{df_g['Kcal'].sum():.0f} Kcal` | 🥩 P: `{df_g['Proteine'].sum():.1f}g` | 🍚 C: `{df_g['Carboidrati'].sum():.1f}g` | 🥑 G: `{df_g['Grassi'].sum():.1f}g`")
+                    st.markdown("---")
+
+                    for p_nome in st.session_state["elenco_pasti"]:
+                        st.markdown(f"<div class='meal-card'><strong>🍽️ {p_nome.upper()}</strong></div>", unsafe_allow_html=True)
+                        if not df_g.empty:
+                            sub_pasto = df_g[df_g["Pasto"] == p_nome]
+                            for _, row in sub_pasto.iterrows():
+                                c_info, c_del = st.columns([6, 1])
+                                with c_info:
+                                    st.write(f"• **{row['Alimento']}** — **{row['Grammi']}g** | `{row['Kcal']} kcal` (P: {row['Proteine']}g, C: {row['Carboidrati']}g, G: {row['Grassi']}g)")
+                                with c_del:
+                                    if st.button("❌", key=f"del_{row['id']}_{g}_{p_nome}", help="Elimina"):
+                                        supabase.table("voci_dieta").delete().eq("id", row["id"]).execute()
+                                        st.rerun()
+                        
+                        with st.form(f"form_add_{g}_{p_nome}", clear_on_submit=True):
+                            c_in_al, c_in_gr, c_btn = st.columns([3.5, 1.2, 1.2])
+                            with c_in_al: scelta_al = st.selectbox("Alimento:", nomi_completi, key=f"sel_{g}_{p_nome}", label_visibility="collapsed")
+                            with c_in_gr: quantita = st.number_input("Grammi", min_value=5.0, value=100.0, step=10.0, key=f"gr_{g}_{p_nome}", label_visibility="collapsed")
+                            with c_btn: invia = st.form_submit_button("➕ Inserisci", use_container_width=True, type="primary")
+                            if invia and scelta_al:
+                                al_obj = dict_alimenti[scelta_al.lower()]
+                                supabase.table("voci_dieta").insert({
+                                    "dieta_id": dieta["id"], "giorno_settimana": g, "pasto": p_nome,
+                                    "alimento_id": al_obj["id"], "grammi": quantita
+                                }).execute()
+                                st.rerun()
+
+# -------------------------------------------------------------------------------------------------
+# 3. CATALOGO ALIMENTI
+# -------------------------------------------------------------------------------------------------
+elif scelta_menu == "🍎 Catalogo Alimenti & Cibi":
+    st.subheader("🍎 Database Alimenti & Valori Nutrizionali dello Studio")
+    st.caption("Aggiungi o consulta alimenti e prodotti commerciali (valori per 100g di parte edibile)[cite: 1].")
+
+    tab_elenco_cibi, tab_nuovo_cibo = st.tabs(["📋 Tabella Alimenti dello Studio", "➕ Inserisci Nuovo Alimento / Prodotto"])
+
+    with tab_nuovo_cibo:
+        with st.form("form_nuovo_alimento", clear_on_submit=True):
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                nome_cibo = st.text_input("Nome Alimento / Marchio Prodotto*", placeholder="Es: Fage Total 0%, Whey Isolate...")
+                categoria_cibo = st.selectbox("Categoria:", ["Cereali & Derivati", "Carne, Pesce & Uova", "Latticini & Formaggi", "Frutta & Verdura", "Legumi", "Grassi & Condimenti", "Integratori", "Altro"])
+            with col_a2:
+                kcal_100g = st.number_input("Energia (Kcal per 100g)*", min_value=0.0, max_value=950.0, value=150.0, step=5.0)
+
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            with col_m1: prot_100g = st.number_input("Proteine (g/100g)", min_value=0.0, max_value=100.0, value=10.0, step=0.5)
+            with col_m2: carb_100g = st.number_input("Carboidrati (g/100g)", min_value=0.0, max_value=100.0, value=20.0, step=0.5)
+            with col_m3: grassi_100g = st.number_input("Grassi / Lipidi (g/100g)", min_value=0.0, max_value=100.0, value=3.0, step=0.5)
+            with col_m4: fibra_100g = st.number_input("Fibra (g/100g)", min_value=0.0, max_value=100.0, value=1.0, step=0.5)
+
+            if st.form_submit_button("Salva Alimento nel Database", type="primary"):
+                if nome_cibo.strip():
+                    try:
+                        supabase.table("alimenti").insert({
+                            "nome": nome_cibo.strip(), "energia_kcal": kcal_100g, "proteine_g": prot_100g,
+                            "carboidrati_g": carb_100g, "lipidi_g": grassi_100g, "fibra_g": fibra_100g, "categoria": categoria_cibo
+                        }).execute()
+                        st.success(f"Alimento '{nome_cibo}' inserito con successo!")
+                        st.rerun()
+                    except Exception as e_cibo:
+                        st.error(f"Errore inserimento: {e_cibo}")
+                else:
+                    st.error("Il nome dell'alimento è obbligatorio.")
+
+    with tab_elenco_cibi:
+        try:
+            res_all_alim = supabase.table("alimenti").select("*").order("nome").execute()
+            lista_all_alim = res_all_alim.data or []
+        except Exception: lista_all_alim = []
+
+        if lista_all_alim:
+            c_cerca_cibo, c_conteggio = st.columns([3, 1])
+            with c_cerca_cibo: filtro_cibo = st.text_input("🔍 Cerca alimento per nome:", "").lower()
+            with c_conteggio: st.write(""); st.write(f"Totale alimenti: **{len(lista_all_alim)}**")
+
+            filtrati_cibi = [a for a in lista_all_alim if filtro_cibo in a["nome"].lower()]
+            df_cibi = pd.DataFrame(filtrati_cibi)
+            st.dataframe(df_cibi[["nome", "energia_kcal", "proteine_g", "carboidrati_g", "lipidi_g", "fibra_g", "categoria"]], use_container_width=True)
+
+            with st.expander("🗑️ Eliminazione Alimento"):
+                c_del_sel, c_del_act = st.columns([3, 1])
+                with c_del_sel:
+                    map_del_cibo = {f"{a['nome']} ({a['energia_kcal']} kcal)": a["id"] for a in filtrati_cibi}
+                    if map_del_cibo: cibo_da_eliminare = st.selectbox("Seleziona alimento:", list(map_del_cibo.keys()))
+                with c_del_act:
+                    st.write("")
+                    if map_del_cibo and st.button("Elimina Alimento", type="secondary"):
+                        try:
+                            supabase.table("alimenti").delete().eq("id", map_del_cibo[cibo_da_eliminare]).execute()
+                            st.success("Alimento rimosso!")
+                            st.rerun()
+                        except Exception as e_del:
+                            st.error(f"Impossibile eliminare: {e_del}")
+        else:
+            st.info("Nessun alimento presente nel database.")
+
+# -------------------------------------------------------------------------------------------------
+# 4. STATISTICHE CLINICHE & ANALYTICS
+# -------------------------------------------------------------------------------------------------
+elif scelta_menu == "📊 Statistiche & Analytics":
+    st.subheader("📊 Cruscotto Statistico & Risultati Clinici dello Studio")
+    st.caption("Panoramica globale dell'andamento dei pazienti, efficacia dei trattamenti e distribuzione degli obiettivi nutrizionali.")
+
+    try:
+        pazienti_all = supabase.table("pazienti").select("*").execute().data or []
+        misure_all = supabase.table("misure_pazienti").select("*").order("data_rilevazione").execute().data or []
+        visite_all = supabase.table("scadenze").select("*").execute().data or []
+    except Exception:
+        pazienti_all, misure_all, visite_all = [], [], []
+
+    if pazienti_all:
+        tot_pazienti = len(pazienti_all)
+        tot_visite = len(visite_all)
+
+        df_mis = pd.DataFrame(misure_all) if misure_all else pd.DataFrame()
+        tot_kg_persi = 0.0
+        miglior_calo = 0.0
+        miglior_paziente_nome = "N/D"
+
+        tabella_risultati = []
+        if not df_mis.empty:
+            for p in pazienti_all:
+                sub_p = df_mis[df_mis["paziente_id"] == p["id"]]
+                if len(sub_p) >= 2:
+                    p_ini = float(sub_p.iloc[0]["peso_kg"])
+                    p_fin = float(sub_p.iloc[-1]["peso_kg"])
+                    delta = p_fin - p_ini
+                    if delta < 0:
+                        calo = abs(delta)
+                        tot_kg_persi += calo
+                        if calo > miglior_calo:
+                            miglior_calo = calo
+                            miglior_paziente_nome = f"{p['cognome']} {p['nome']}"
+                    
+                    tabella_risultati.append({
+                        "Paziente": f"{p['cognome']} {p['nome']}",
+                        "Obiettivo": p.get("obiettivo_clinico") or "Dimagrimento",
+                        "Peso Iniziale (kg)": p_ini,
+                        "Peso Attuale (kg)": p_fin,
+                        "Variazione (kg)": round(delta, 1),
+                        "Rilevazioni Effettuate": len(sub_p)
+                    })
+
+        col_st1, col_st2, col_st3, col_st4 = st.columns(4)
+        col_st1.metric("Pazienti Totali in Archivio", f"{tot_pazienti}")
+        col_st2.metric("Chili Persi Globali nello Studio", f"{tot_kg_persi:.1f} kg")
+        col_st3.metric("Visite & Controlli Registrati", f"{tot_visite}")
+        col_st4.metric("Miglior Risultato Singolo", f"-{miglior_calo:.1f} kg" if miglior_calo > 0 else "0.0 kg", f"{miglior_paziente_nome}")
+
+        st.markdown("---")
+
+        c_graf1, c_graf2 = st.columns(2)
+        with c_graf1:
+            st.markdown("##### 🎯 Distribuzione Obiettivi Clinici")
+            df_paz = pd.DataFrame(pazienti_all)
+            if "obiettivo_clinico" in df_paz.columns:
+                ob_counts = df_paz["obiettivo_clinico"].fillna("Dimagrimento / Ricomposizione").value_counts()
+                fig_ob, ax_ob = plt.subplots(figsize=(4.5, 2.3))
+                ax_ob.pie(ob_counts.values, labels=ob_counts.index, autopct='%1.1f%%', startangle=90, colors=['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6'])
+                ax_ob.axis('equal')
+                st.pyplot(fig_ob)
+
+        with c_graf2:
+            st.markdown("##### 📈 Tipologia di Visite Pianificate")
+            if visite_all:
+                df_vis = pd.DataFrame(visite_all)
+                vis_counts = df_vis["categoria"].fillna("ALTRO").value_counts()
+                fig_vis, ax_vis = plt.subplots(figsize=(4.5, 2.3))
+                ax_vis.bar([str(x)[:12] for x in vis_counts.index], vis_counts.values, color="#6366F1")
+                ax_vis.set_ylabel("Numero Visite")
+                plt.xticks(rotation=15)
+                st.pyplot(fig_vis)
+
+        st.markdown("---")
+        st.markdown("##### 📋 Monitoraggio Aderenza e Progressi Pazienti")
+        if tabella_risultati:
+            df_tab_ris = pd.DataFrame(tabella_risultati).sort_values(by="Variazione (kg)")
+            st.dataframe(df_tab_ris, use_container_width=True)
+        else:
+            st.info("Registra almeno 2 controlli peso per visualizzare la tabella dei progressi ponderali.")
+    else:
+        st.info("Nessun paziente presente.")
+
+# -------------------------------------------------------------------------------------------------
+# 5. CALENDARIO
+# -------------------------------------------------------------------------------------------------
+elif scelta_menu == "📅 Calendario & Visite":
+    st.subheader("🗓️ Agenda Appuntamenti & Calendario Studio")
+    st.caption("Sincronizzato in tempo reale con rodolfocasa22@gmail.com con avvisi a -30, -10 e -5 giorni.")
+    
+    res_scad = supabase.table("scadenze").select("id, titolo, data_scadenza, categoria, google_event_id, pazienti(nome, cognome, telefono)").order("data_scadenza").execute()
+    eventi_db = res_scad.data or []
+
+    c_ins, c_cal_view = st.columns([1.1, 2.5])
+    with c_ins:
+        st.markdown("#### ➕ Pianifica Visita o Scadenza")
+        res_p = supabase.table("pazienti").select("id, nome, cognome").order("cognome").execute()
+        paz_map = {f"{p['cognome']} {p['nome']}": p['id'] for p in (res_p.data or [])}
+        
+        with st.form("form_ev_cal_modern", clear_on_submit=True):
+            paz_c = st.selectbox("Paziente collegato:", ["-- Scadenza Generale Studio --"] + list(paz_map.keys()))
+            tit = st.text_input("Oggetto / Tipo Visita", placeholder="Es: Prima Visita, Controllo Mensile...")
+            col_d, col_o = st.columns(2)
+            with col_d: d_ev = st.date_input("Data Visita", value=date.today())
+            with col_o: ora_ev = st.time_input("Orario", value=datetime.strptime("10:00", "%H:%M").time())
+            cat = st.selectbox("Categoria", ["CONTROLLO_PAZIENTE", "PRIMA_VISITA", "SISTEMA_TS", "ENPAB", "ALTRO"])
+            sync_g = st.checkbox("Sincronizza su Google Calendar (avvisi -30, -10, -5 gg)", value=True)
+            
+            if st.form_submit_button("Inserisci in Calendario", type="primary", use_container_width=True) and tit:
+                p_id = paz_map[paz_c] if paz_c != "-- Scadenza Generale Studio --" else None
+                nome_paz_str = f" - {paz_c}" if p_id else ""
+                data_str = str(d_ev)
+                g_event_id = None
+                
+                if sync_g:
+                    g_event_id, _ = crea_evento_calendar(f"[{cat}] {tit}{nome_paz_str}", data_str, f"Orario: {ora_ev}")
+                
+                supabase.table("scadenze").insert({
+                    "titolo": f"{tit}{nome_paz_str}", "data_scadenza": data_str, "categoria": cat, "paziente_id": p_id, "google_event_id": g_event_id
+                }).execute()
+                st.success("Registrato!")
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("#### 🗑️ Gestione / Cancella Appuntamenti")
+        if eventi_db:
+            opzioni_canc_cal = {f"{ev['data_scadenza']} | {ev['titolo']}": ev for ev in eventi_db}
+            sel_canc = st.selectbox("Seleziona evento da gestire:", list(opzioni_canc_cal.keys()))
+            ev_da_eliminare = opzioni_canc_cal[sel_canc]
+            
+            c_btn_del, c_btn_wa_cal = st.columns(2)
+            with c_btn_del:
+                if st.button("🗑️ Elimina", use_container_width=True):
+                    if ev_da_eliminare.get("google_event_id"):
+                        elimina_evento_calendar(ev_da_eliminare["google_event_id"])
+                    supabase.table("scadenze").delete().eq("id", ev_da_eliminare["id"]).execute()
+                    st.success("Evento rimosso!")
+                    st.rerun()
+            
+            with c_btn_wa_cal:
+                pz_info = ev_da_eliminare.get("pazienti")
+                if pz_info and pz_info.get("telefono"):
+                    tel_w = str(pz_info['telefono']).replace(" ", "").replace("+", "")
+                    txt_w = f"Gentile {pz_info['nome']}, le ricordo l'appuntamento per {ev_da_eliminare['titolo']} fissato per il {ev_da_eliminare['data_scadenza']}. Dott. Rodolfo Casa"
+                    st.link_button("📲 WhatsApp", f"https://wa.me/{tel_w}?text={urllib.parse.quote(txt_w)}", use_container_width=True)
+        else:
+            st.info("Nessun appuntamento da gestire.")
+
+    with c_cal_view:
+        color_map = {"PRIMA_VISITA": "#10B981", "CONTROLLO_PAZIENTE": "#2563EB", "SISTEMA_TS": "#EF4444", "ENPAB": "#F59E0B", "ALTRO": "#6B7280"}
+        eventi_fc = []
+        for x in eventi_db:
+            colore = color_map.get(x.get("categoria"), "#2563EB")
+            pz = x.get("pazienti")
+            nome_paz = f" ({pz['cognome']} {pz['nome']})" if pz else ""
+            eventi_fc.append({"title": f"{x['titolo']}{nome_paz}", "start": x["data_scadenza"], "color": colore, "allDay": True})
+        
+        eventi_json = json.dumps(eventi_fc)
+        data_iniziale = date.today().strftime("%Y-%m-%d")
+
+        html_calendar = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset='utf-8' />
+            <link href='https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.css' rel='stylesheet' />
+            <script src='https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.js'></script>
+            <script src='https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/locales/it.js'></script>
+            <style>
+                body {{ font-family: sans-serif; margin: 0; padding: 0; background: #fff; }}
+                #calendar {{ max-width: 100%; margin: 0 auto; padding: 6px; }}
+                .fc-toolbar-title {{ font-size: 1.25rem !important; font-weight: 700; color: #1E293B; }}
+                .fc-button-primary {{ background-color: #2563EB !important; border: none !important; }}
+                .fc-event {{ cursor: pointer; border-radius: 4px; padding: 2px 4px; font-size: 0.85rem; border: none; }}
+            </style>
+        </head>
+        <body>
+            <div id='calendar'></div>
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {{
+                    var calendarEl = document.getElementById('calendar');
+                    var calendar = new FullCalendar.Calendar(calendarEl, {{
+                        locale: 'it', initialView: 'dayGridMonth', initialDate: '{data_iniziale}',
+                        headerToolbar: {{ left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek' }},
+                        buttonText: {{ today: 'Oggi', month: 'Mese', week: 'Settimana' }},
+                        events: {eventi_json}
+                    }});
+                    calendar.render();
+                }});
+            </script>
+        </body>
+        </html>
+        """
+        components.html(html_calendar, height=560, scrolling=False)
+
+# -------------------------------------------------------------------------------------------------
+# 6. RESOCONTO ECONOMICO & FATTURAZIONE SANITARIA
+# -------------------------------------------------------------------------------------------------
+elif scelta_menu == "💶 Resoconto & Fatturazione Sanitaria":
+    st.subheader("Bilancio Studio & Gestione Fatture Sanitarie")
+    tab_registro, tab_fattura, tab_sts = st.tabs(["📊 Registro Movimenti & Bilancio", "🧾 Emetti Fattura Sanitaria PDF", "🏛️ Export Tracciato Sistema TS"])
+
+    with tab_fattura:
+        st.markdown("#### 🧾 Generatore Fattura Sanitaria Professionale")
+        res_p = supabase.table("pazienti").select("*").order("cognome").execute()
+        pazienti_list = res_p.data or []
+        
+        if not pazienti_list:
+            st.warning("Inserisci prima un paziente.")
+        else:
+            mappa_fat = {f"{p['cognome']} {p['nome']} (CF: {p.get('codice_fiscale') or 'N/D'})": p for p in pazienti_list}
+            paz_fat_str = st.selectbox("Intesta Fattura a:", list(mappa_fat.keys()))
+            paz_fat = mappa_fat[paz_fat_str]
+
+            c_f1, c_f2, c_f3 = st.columns(3)
+            with c_f1: num_fat = st.text_input("Numero Fattura", value=f"FAT-{date.today().year}-001")
+            with c_f2: data_fat = st.date_input("Data Emissione", value=date.today())
+            with c_f3: metodo_pag = st.selectbox("Metodo Pagamento", ["Bonifico Bancario", "POS / Carta di Debito", "Contanti"])
+
+            desc_prestazione = st.text_input("Descrizione Prestazione Sanitaria", value="Consulenza e valutazione nutrizionale con piano alimentare personalizzato")
+            onorario_base = st.number_input("Onorario Base Prestazione (€)", min_value=10.0, value=100.0, step=5.0)
+
+            rivalsa_enpab = onorario_base * 0.04
+            imponibile_totale = onorario_base + rivalsa_enpab
+            marca_da_bollo = 2.00 if imponibile_totale > 77.47 else 0.00
+            totale_da_pagare = imponibile_totale + marca_da_bollo
+
+            st.markdown("---")
+            m_f1, m_f2, m_f3, m_f4 = st.columns(4)
+            m_f1.metric("Onorario Base", f"€ {onorario_base:.2f}")
+            m_f2.metric("ENPAB (4%)", f"€ {rivalsa_enpab:.2f}")
+            m_f3.metric("Marca da Bollo", f"€ {marca_da_bollo:.2f}")
+            m_f4.metric("Totale Fattura", f"€ {totale_da_pagare:.2f}")
+
+            class PDFFattura(FPDF):
+                def header(self):
+                    self.set_font('Helvetica', 'B', 14)
+                    self.cell(self.epw, 6, "STUDIO DI NUTRIZIONE CLINICA", align='L', new_x="LMARGIN", new_y="NEXT")
+                    self.set_font('Helvetica', '', 8.5)
+                    self.cell(self.epw, 4, "Biologo Nutrizionista | Ricevuta Sanitaria Tracciabile", align='L', new_x="LMARGIN", new_y="NEXT")
+                    self.ln(6)
+                def footer(self):
+                    self.set_y(-12)
+                    self.set_font('Helvetica', 'I', 8)
+                    self.cell(self.epw, 10, f'Pagina {self.page_no()}', align='C')
+
+            def crea_pdf_fattura():
+                pdf = PDFFattura()
+                pdf.add_page()
+                w_utile = pdf.epw
+
+                pdf.set_font("Helvetica", "B", 12)
+                pdf.cell(w_utile, 7, f"FATTURA SANITARIA N. {num_fat} del {data_fat.strftime('%d/%m/%Y')}", new_x="LMARGIN", new_y="NEXT")
+                pdf.ln(3)
+                pdf.set_font("Helvetica", "B", 10)
+                pdf.cell(w_utile, 5, "DATI DEL CLIENTE / PAZIENTE:", new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("Helvetica", "", 9)
+                pdf.cell(w_utile, 5, f"Nome e Cognome: {paz_fat['cognome']} {paz_fat['nome']}", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(w_utile, 5, f"Codice Fiscale: {paz_fat.get('codice_fiscale') or 'N/D'}", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(w_utile, 5, f"Modalita' Pagamento: {metodo_pag}", new_x="LMARGIN", new_y="NEXT")
+                pdf.ln(6)
+                pdf.set_font("Helvetica", "B", 9)
+                pdf.set_fill_color(240, 240, 240)
+                pdf.cell(w_utile * 0.75, 6, "  Descrizione Prestazione", border=1, fill=True)
+                pdf.cell(w_utile * 0.25, 6, "Importo", border=1, fill=True, align='R', new_x="LMARGIN", new_y="NEXT")
+
+                pdf.set_font("Helvetica", "", 9)
+                pdf.cell(w_utile * 0.75, 6, f"  {desc_prestazione}", border=1)
+                pdf.cell(w_utile * 0.25, 6, f"E {onorario_base:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(w_utile * 0.75, 6, "  Contributo Integrativo ENPAB (4%)", border=1)
+                pdf.cell(w_utile * 0.25, 6, f"E {rivalsa_enpab:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
+                if marca_da_bollo > 0:
+                    pdf.cell(w_utile * 0.75, 6, "  Imposta di bollo assolta sull'originale (D.M. 17/06/2014)", border=1)
+                    pdf.cell(w_utile * 0.25, 6, f"E {marca_da_bollo:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("Helvetica", "B", 10)
+                pdf.cell(w_utile * 0.75, 7, "  TOTALE DOVUTO", border=1, fill=True)
+                pdf.cell(w_utile * 0.25, 7, f"E {totale_da_pagare:.2f}  ", border=1, fill=True, align='R', new_x="LMARGIN", new_y="NEXT")
+                pdf.ln(6)
+                pdf.set_font("Helvetica", "I", 8)
+                pdf.multi_cell(w_utile, 4, "Operazione esente da IVA ai sensi dell'art. 10, comma 1, n. 18 del D.P.R. 633/1972. Spesa sanitaria detraibile con pagamento tracciabile.", new_x="LMARGIN", new_y="NEXT")
+                return bytes(pdf.output())
+
+            col_btn_f1, col_btn_f2 = st.columns([1.5, 2])
+            with col_btn_f1:
+                st.download_button("📥 Scarica Fattura Sanitaria (PDF)", crea_pdf_fattura(), file_name=f"Fattura_{num_fat}_{paz_fat['cognome']}.pdf", mime="application/pdf", type="primary", use_container_width=True)
+            with col_btn_f2:
+                if st.button("💾 Registra Incasso nel Registro Economico", use_container_width=True):
+                    try:
+                        supabase.table("movimenti_fiscali").insert({
+                            "descrizione": f"Fattura {num_fat} - {paz_fat['cognome']} {paz_fat['nome']} (CF: {paz_fat.get('codice_fiscale')})",
+                            "importo": totale_da_pagare,
+                            "tipo": "ENTRATA",
+                            "data": str(data_fat),
+                            "metodo": metodo_pag
+                        }).execute()
+                        st.success("Fattura archiviata nel registro delle entrate!")
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Errore registrazione: {err}")
+
+    with tab_sts:
+        st.markdown("#### 🏛️ Generatore Tracciato Sistema Tessera Sanitaria (MEF)")
+        try:
+            res_sts = supabase.table("movimenti_fiscali").select("*").filter("tipo", "eq", "ENTRATA").order("data").execute()
+            mov_entrate = res_sts.data or []
+        except Exception: mov_entrate = []
+
+        if mov_entrate:
+            righe_sts = []
+            for e in mov_entrate:
+                cf_estratto = "NON INDICATO"
+                if "CF:" in e["descrizione"]:
+                    cf_estratto = e["descrizione"].split("CF:")[1].replace(")", "").strip()
+                righe_sts.append({
+                    "Data Emissione": e["data"],
+                    "Numero Fattura / Descrizione": e["descrizione"],
+                    "Codice Fiscale Paziente": cf_estratto,
+                    "Importo Totale (€)": e["importo"],
+                    "Pagamento Tracciato": "Sì" if e.get("metodo") != "Contanti" else "No",
+                    "Tipo Spesa": "SP (Spesa Sanitaria)"
+                })
+            df_sts = pd.DataFrame(righe_sts)
+            st.dataframe(df_sts, use_container_width=True)
+            st.download_button("📥 Scarica Tracciato Spese Sistema TS (CSV)", df_sts.to_csv(index=False).encode('utf-8'), file_name=f"Tracciato_Sistema_TS_{date.today().year}.csv", mime="text/csv", type="primary")
+        else:
+            st.info("Nessuna fattura emessa registrata.")
+
+    with tab_registro:
+        c_form, c_metriche = st.columns([1.1, 2.3])
+        with c_form:
+            st.markdown("#### ➕ Registra Spesa / Entrata Manuale")
+            with st.form("form_trans_manuale", clear_on_submit=True):
+                tipo = st.selectbox("Tipologia", ["Incasso Visita (Entrata)", "Spesa Studio Deducibile (Uscita)"])
+                desc = st.text_input("Descrizione", placeholder="Es: Quota Ordine, Software, Carta lettino...")
+                val = st.number_input("Importo (€)", min_value=1.0, value=90.0, step=5.0)
+                data_m = st.date_input("Data Movimento", value=date.today())
+                met = st.selectbox("Metodo Pagamento", ["POS / Carta", "Bonifico Bancario", "Contanti"])
+                if st.form_submit_button("Salva Movimento", type="primary"):
+                    is_e = "Entrata" in tipo
+                    try:
+                        supabase.table("movimenti_fiscali").insert({
+                            "descrizione": desc, "importo": val if is_e else -val,
+                            "tipo": "ENTRATA" if is_e else "USCITA", "data": str(data_m), "metodo": met
+                        }).execute()
+                        st.success("Registrato!")
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Errore: {err}")
+
+        with c_metriche:
+            movs = []
+            try:
+                res_m = supabase.table("movimenti_fiscali").select("*").order("data", desc=True).execute()
+                movs = res_m.data or []
+            except Exception: movs = []
+                
+            if movs:
+                df_m = pd.DataFrame(movs)
+                tot_in = df_m[df_m["importo"] > 0]["importo"].sum()
+                tot_out = abs(df_m[df_m["importo"] < 0]["importo"].sum())
+                utile = tot_in - tot_out
+                enpab = tot_in * 0.04
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Totale Incassi", f"€ {tot_in:,.2f}")
+                m2.metric("Spese Totali", f"€ {tot_out:,.2f}")
+                m3.metric("Utile Netto", f"€ {utile:,.2f}")
+                m4.metric("Rivalsa ENPAB (4%)", f"€ {enpab:,.2f}")
+                st.markdown("---")
+                st.markdown("#### 📋 Registro Movimenti")
+                for m in movs:
+                    c_d, c_desc, c_imp, c_met, c_canc = st.columns([1.3, 3, 1.3, 1.8, 1])
+                    c_d.write(f"📅 `{m['data']}`")
+                    c_desc.write(f"**{m['descrizione']}**")
+                    colore_imp = "green" if m["importo"] > 0 else "red"
+                    c_imp.markdown(f"<span style='color:{colore_imp}; font-weight:700;'>€ {float(m['importo']):.2f}</span>", unsafe_allow_html=True)
+                    c_met.write(f"_{m.get('metodo') or 'N/D'}_")
+                    if c_canc.button("🗑️", key=f"del_mov_{m['id']}", help="Elimina"):
+                        supabase.table("movimenti_fiscali").delete().eq("id", m["id"]).execute()
+                        st.success("Eliminato!")
+                        st.rerun()
+            else:
+                st.info("Nessun movimento presente nel registro.")
+
+# -------------------------------------------------------------------------------------------------
+# 7. BACKUP & DISASTER RECOVERY
+# -------------------------------------------------------------------------------------------------
+elif scelta_menu == "💾 Backup & Dati Studio":
+    st.subheader("💾 Backup Completo Studio & Portabilità Dati (GDPR)")
+    st.caption("Estrae una copia di sicurezza integrale di tutte le tabelle del gestionale in formato JSON/Excel compresso in un archivio ZIP.")
+
+    def genera_archivio_backup():
+        buffer_zip = io.BytesIO()
+        tabelle = [
+            "pazienti", "diete", "voci_dieta", "alimenti", "misure_pazienti", 
+            "esami_laboratorio", "scadenze", "movimenti_fiscali", 
+            "template_diete", "template_voci_dieta"
+        ]
+        
+        with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            for tab in tabelle:
+                try:
+                    res_t = supabase.table(tab).select("*").execute()
+                    dati_tab = res_t.data or []
+                    
+                    json_str = json.dumps(dati_tab, indent=2, default=str)
+                    zf.writestr(f"{tab}.json", json_str)
+                    
+                    if dati_tab:
+                        df_tab = pd.DataFrame(dati_tab)
+                        csv_str = df_tab.to_csv(index=False)
+                        zf.writestr(f"{tab}.csv", csv_str)
+                except Exception as err:
+                    zf.writestr(f"{tab}_errore.txt", str(err))
+
+        buffer_zip.seek(0)
+        return buffer_zip.getvalue()
+
+    col_bk1, col_bk2 = st.columns([1.5, 2])
+    with col_bk1:
+        st.write("")
+        st.download_button(
+            label="📦 Scarica Archivio Backup Completo (.ZIP)",
+            data=genera_archivio_backup(),
+            file_name=f"Backup_Studio_Nutrizione_{date.today().strftime('%Y%m%d')}.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True
+        )
+    with col_bk2:
+        st.info("L'archivio ZIP include sia i file JSON completi per il ripristino tecnico sia i file CSV compatibili con Microsoft Excel / Google Sheets.")
