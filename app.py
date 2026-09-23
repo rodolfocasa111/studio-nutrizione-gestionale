@@ -47,11 +47,12 @@ if not os.path.exists(CREDENTIALS_FILE):
 
 st.set_page_config(page_title="Studio Nutrizionale", layout="wide", initial_sidebar_state="collapsed")
 
-# Stile CSS Interfaccia (rimosso il riquadro bianco superiore)
+# Stile CSS Interfaccia (Pulizia totale dei margini superiori)
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { display: none; }
-    .block-container { padding-top: 0.8rem !important; padding-bottom: 2.5rem; }
+    .block-container { padding-top: 0.5rem !important; padding-bottom: 2.0rem; }
+    header {visibility: hidden;}
     
     div[data-testid="stRadio"] > div {
         flex-direction: row;
@@ -92,19 +93,19 @@ st.markdown("""
     .traffic-red { color: #B91C1C; background-color: #FEE2E2; padding: 4px 8px; border-radius: 6px; font-weight: 700; }
     .login-box {
         max-width: 420px;
-        margin: 10px auto;
-        padding: 25px;
+        margin: 40px auto;
+        padding: 30px;
         background: #FFFFFF;
         border-radius: 14px;
         border: 1px solid #E2E8F0;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+        box-shadow: 0 4px 16px rgba(0,0,0,0.08);
         text-align: center;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------------------------------------
-# CONTROLLO SESSIONE & GATEWAY DI LOGIN (CENTRATO E PULITO)
+# CONTROLLO SESSIONE & GATEWAY DI LOGIN (CENTRATO SENZA SPAZI VUoti)
 # -------------------------------------------------------------------------------------------------
 if "autenticato" not in st.session_state:
     st.session_state["autenticato"] = False
@@ -116,10 +117,10 @@ if not st.session_state["autenticato"]:
     if os.path.exists(os.path.join(BASE_DIR, "logo.png")):
         col_img1, col_img2, col_img3 = st.columns([1, 1.8, 1])
         with col_img2:
-            st.image(os.path.join(BASE_DIR, "logo.png"), width=120)
+            st.image(os.path.join(BASE_DIR, "logo.png"), width=110)
             
-    st.markdown("<h4 style='color:#1E3A8A; margin-top:8px; margin-bottom:0px;'>Portale Studio Dott. Casa Rodolfo</h4>", unsafe_allow_html=True)
-    st.markdown("<p style='color:#64748B; font-size:0.85rem; margin-bottom:15px;'>Studio di Nutrizione Clinica & Metabolismo</p>", unsafe_allow_html=True)
+    st.markdown("<h4 style='color:#1E3A8A; margin-top:10px; margin-bottom:2px;'>Portale Studio Dott. Casa Rodolfo</h4>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#64748B; font-size:0.85rem; margin-bottom:20px;'>Studio di Nutrizione Clinica & Metabolismo</p>", unsafe_allow_html=True)
     
     with st.form("form_login"):
         user_input = st.text_input("Nome Utente", placeholder="es: dott.casa")
@@ -145,7 +146,7 @@ if not st.session_state["autenticato"]:
 c_logo, c_top_title, c_top_user = st.columns([0.6, 3.4, 1.2])
 with c_logo:
     if os.path.exists(os.path.join(BASE_DIR, "logo.png")):
-        st.image(os.path.join(BASE_DIR, "logo.png"), width=60)
+        st.image(os.path.join(BASE_DIR, "logo.png"), width=55)
 with c_top_title:
     st.markdown("<span style='font-weight:700; color:#1E3A8A; font-size:1.05rem;'>🥗 Portale Studio Dott. Casa Rodolfo</span><br><span style='font-size:0.8rem; color:#64748B;'>Nutrizione Clinica & Metabolismo</span>", unsafe_allow_html=True)
 with c_top_user:
