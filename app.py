@@ -703,7 +703,6 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
 
             st.write("✍️ **Firma del Paziente nel riquadro sottostante:**")
             
-            # Gestione sicura del canvas senza crash se non supportato da alcune versioni di streamlit-drawable-canvas
             try:
                 canvas_result = st_canvas(
                     stroke_width=2,
@@ -720,7 +719,7 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
                     if img_data.max() > 0:
                         firma_pil = Image.fromarray(img_data.astype('uint8'))
             except Exception as e_canvas:
-                st.warning(fModalità firma alternativa attiva (Canvas non caricato: {e_canvas}))
+                st.warning("Modalità firma alternativa attiva (Canvas non caricato)")
                 firma_pil = None
 
             col_btn_sign1, col_btn_sign2 = st.columns([1.5, 2])
