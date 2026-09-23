@@ -471,7 +471,7 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
         with st.form("form_paz_new", clear_on_submit=True):
             c1, c2, c3 = st.columns(3)
             with c1: n = st.text_input("Nome*"); cf = st.text_input("Codice Fiscale*").upper()
-            with c2: c = st.text_input("Cognome*"); dn = st.date_input("Data di Nascita", value=date(1990, 1, 1))
+            dn = st.date_input("Data di Nascita", value=date(1990, 1, 1), min_value=date(1920, 1, 1), max_value=date.today())
             with c3: tel = st.text_input("Telefono (es: 3401234567)"); em = st.text_input("Email")
             
             c_ob, _ = st.columns(2)
