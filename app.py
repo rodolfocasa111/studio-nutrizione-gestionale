@@ -47,7 +47,7 @@ if not os.path.exists(CREDENTIALS_FILE):
 
 st.set_page_config(page_title="Studio Nutrizionale", layout="wide", initial_sidebar_state="collapsed")
 
-# Stile CSS Interfaccia Professionale
+# Stile CSS Interfaccia
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { display: none; }
@@ -92,7 +92,7 @@ st.markdown("""
     .traffic-red { color: #B91C1C; background-color: #FEE2E2; padding: 4px 8px; border-radius: 6px; font-weight: 700; }
     .login-box {
         max-width: 420px;
-        margin: 30px auto;
+        margin: 20px auto;
         padding: 30px;
         background: #FFFFFF;
         border-radius: 14px;
@@ -103,7 +103,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------------------------------------
-# CONTROLLO SESSIONE & GATEWAY DI LOGIN
+# CONTROLLO SESSIONE & GATEWAY DI LOGIN (CON LOGO.PNG)
 # -------------------------------------------------------------------------------------------------
 if "autenticato" not in st.session_state:
     st.session_state["autenticato"] = False
@@ -111,7 +111,12 @@ if "autenticato" not in st.session_state:
 
 if not st.session_state["autenticato"]:
     st.markdown("<div class='login-box'>", unsafe_allow_html=True)
-    st.markdown("<h2 style='text-align:center; color:#1E3A8A;'>🔒 Accesso Riservato</h2>", unsafe_allow_html=True)
+    
+    # Mostra il logo.png se presente nella cartella del progetto
+    if os.path.exists(os.path.join(BASE_DIR, "logo.png")):
+        st.image(os.path.join(BASE_DIR, "logo.png"), use_container_width=True)
+    
+    st.markdown("<h2 style='text-align:center; color:#1E3A8A; margin-top:10px;'>🔒 Accesso Riservato</h2>", unsafe_allow_html=True)
     st.markdown("<p style='text-align:center; color:#64748B; font-size:0.9rem;'>Studio di Nutrizione Clinica & Metabolismo</p>", unsafe_allow_html=True)
     
     with st.form("form_login"):
@@ -133,11 +138,14 @@ if not st.session_state["autenticato"]:
     st.stop()
 
 # -------------------------------------------------------------------------------------------------
-# INTESTAZIONE SESSIONE UTENTE CON LOGOUT
+# INTESTAZIONE SESSIONE UTENTE CON LOGO & LOGOUT
 # -------------------------------------------------------------------------------------------------
-c_top_title, c_top_user = st.columns([4, 1.2])
+c_logo, c_top_title, c_top_user = st.columns([0.6, 3.4, 1.2])
+with c_logo:
+    if os.path.exists(os.path.join(BASE_DIR, "logo.png")):
+        st.image(os.path.join(BASE_DIR, "logo.png"), width=70)
 with c_top_title:
-    st.markdown("<span style='font-weight:700; color:#1E3A8A; font-size:1.1rem;'>🥗 Studio di Nutrizione Clinica & Metabolismo</span>", unsafe_allow_html=True)
+    st.markdown("<span style='font-weight:700; color:#1E3A8A; font-size:1.15rem; line-height: 2.5;'>🥗 Studio di Nutrizione Clinica & Metabolismo</span>", unsafe_allow_html=True)
 with c_top_user:
     c_u_name, c_u_btn = st.columns([1.8, 1])
     with c_u_name:
@@ -851,8 +859,8 @@ elif scelta_menu == "🥗 Piano Settimanale & Template":
                                 if not testo_file.strip():
                                     st.error("Il file risulta vuoto o non leggibile.")
                                 else:
-                                    # Utilizzo del modello stabile standard
-                                    model = genai.GenerativeModel('gemini-1.0-pro')
+                                    # Modello Gemini stabile per API key standard
+                                    model = genai.GenerativeModel('gemini-pro')
                                     prompt_ia = (
                                         "Analizza il seguente testo estratto da un piano alimentare. "
                                         "Estrai i giorni della settimana (Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica), "
