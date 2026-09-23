@@ -3,8 +3,8 @@ supabase
 pandas
 matplotlib
 fpdf2
+streamlit-drawable-canvas
+google-genai
 google-api-python-client
 google-auth
-google-auth-oauthlib
-google-auth-httplib2
-google-genai
+pillow
