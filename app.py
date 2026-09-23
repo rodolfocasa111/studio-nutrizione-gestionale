@@ -51,7 +51,7 @@ st.set_page_config(page_title="Studio Nutrizionale", layout="wide", initial_side
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { display: none; }
-    .block-container { padding-top: 2.2rem !important; padding-bottom: 2.5rem; }
+    .block-container { padding-top: 2.0rem !important; padding-bottom: 2.5rem; }
     
     div[data-testid="stRadio"] > div {
         flex-direction: row;
@@ -92,18 +92,19 @@ st.markdown("""
     .traffic-red { color: #B91C1C; background-color: #FEE2E2; padding: 4px 8px; border-radius: 6px; font-weight: 700; }
     .login-box {
         max-width: 420px;
-        margin: 20px auto;
-        padding: 30px;
+        margin: 15px auto;
+        padding: 25px;
         background: #FFFFFF;
         border-radius: 14px;
         border: 1px solid #E2E8F0;
         box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+        text-align: center;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------------------------------------
-# CONTROLLO SESSIONE & GATEWAY DI LOGIN (CON LOGO.PNG)
+# CONTROLLO SESSIONE & GATEWAY DI LOGIN (CON LOGO RIDOTTO E TITOLO SOTTO)
 # -------------------------------------------------------------------------------------------------
 if "autenticato" not in st.session_state:
     st.session_state["autenticato"] = False
@@ -112,12 +113,13 @@ if "autenticato" not in st.session_state:
 if not st.session_state["autenticato"]:
     st.markdown("<div class='login-box'>", unsafe_allow_html=True)
     
-    # Mostra il logo.png se presente nella cartella del progetto
     if os.path.exists(os.path.join(BASE_DIR, "logo.png")):
-        st.image(os.path.join(BASE_DIR, "logo.png"), use_container_width=True)
-    
-    st.markdown("<h2 style='text-align:center; color:#1E3A8A; margin-top:10px;'>🔒 Accesso Riservato</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center; color:#64748B; font-size:0.9rem;'>Studio di Nutrizione Clinica & Metabolismo</p>", unsafe_allow_html=True)
+        col_img1, col_img2, col_img3 = st.columns([1, 2.2, 1])
+        with col_img2:
+            st.image(os.path.join(BASE_DIR, "logo.png"), width=130)
+            
+    st.markdown("<h4 style='color:#1E3A8A; margin-top:5px; margin-bottom:0px;'>Portale Studio Dott. Casa Rodolfo</h4>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#64748B; font-size:0.85rem; margin-bottom:15px;'>Studio di Nutrizione Clinica & Metabolismo</p>", unsafe_allow_html=True)
     
     with st.form("form_login"):
         user_input = st.text_input("Nome Utente", placeholder="es: dott.casa")
@@ -138,14 +140,14 @@ if not st.session_state["autenticato"]:
     st.stop()
 
 # -------------------------------------------------------------------------------------------------
-# INTESTAZIONE SESSIONE UTENTE CON LOGO & LOGOUT
+# INTESTAZIONE SESSIONE UTENTE CON LOGO RIDOTTO, TITOLO E LOGOUT
 # -------------------------------------------------------------------------------------------------
 c_logo, c_top_title, c_top_user = st.columns([0.6, 3.4, 1.2])
 with c_logo:
     if os.path.exists(os.path.join(BASE_DIR, "logo.png")):
-        st.image(os.path.join(BASE_DIR, "logo.png"), width=70)
+        st.image(os.path.join(BASE_DIR, "logo.png"), width=60)
 with c_top_title:
-    st.markdown("<span style='font-weight:700; color:#1E3A8A; font-size:1.15rem; line-height: 2.5;'>🥗 Studio di Nutrizione Clinica & Metabolismo</span>", unsafe_allow_html=True)
+    st.markdown("<span style='font-weight:700; color:#1E3A8A; font-size:1.05rem;'>🥗 Portale Studio Dott. Casa Rodolfo</span><br><span style='font-size:0.8rem; color:#64748B;'>Nutrizione Clinica & Metabolismo</span>", unsafe_allow_html=True)
 with c_top_user:
     c_u_name, c_u_btn = st.columns([1.8, 1])
     with c_u_name:
@@ -753,7 +755,7 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
                     st.info("Traccia la firma sopra oppure scarica il modulo standard.")
 
 # -------------------------------------------------------------------------------------------------
-# 2. PIANO SETTIMANALE & TEMPLATE CON INTEGRAZIONE GEMINI (MODELLO STABILE)
+# 2. PIANO SETTIMANALE & TEMPLATE CON INTEGRAZIONE GEMINI
 # -------------------------------------------------------------------------------------------------
 elif scelta_menu == "🥗 Piano Settimanale & Template":
     res_paz = supabase.table("pazienti").select("id, nome, cognome, codice_fiscale").order("cognome").execute()
@@ -859,7 +861,6 @@ elif scelta_menu == "🥗 Piano Settimanale & Template":
                                 if not testo_file.strip():
                                     st.error("Il file risulta vuoto o non leggibile.")
                                 else:
-                                    # Modello Gemini stabile per API key standard
                                     model = genai.GenerativeModel('gemini-pro')
                                     prompt_ia = (
                                         "Analizza il seguente testo estratto da un piano alimentare. "
