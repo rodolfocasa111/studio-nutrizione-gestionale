@@ -47,7 +47,7 @@ if not os.path.exists(CREDENTIALS_FILE):
 
 st.set_page_config(page_title="Studio Nutrizionale", layout="wide", initial_sidebar_state="collapsed")
 
-# Stile CSS Interfaccia
+# Stile CSS Interfaccia Professionale
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { display: none; }
@@ -92,7 +92,7 @@ st.markdown("""
     .traffic-red { color: #B91C1C; background-color: #FEE2E2; padding: 4px 8px; border-radius: 6px; font-weight: 700; }
     .login-box {
         max-width: 420px;
-        margin: 50px auto;
+        margin: 30px auto;
         padding: 30px;
         background: #FFFFFF;
         border-radius: 14px;
@@ -745,7 +745,7 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
                     st.info("Traccia la firma sopra oppure scarica il modulo standard.")
 
 # -------------------------------------------------------------------------------------------------
-# 2. PIANO SETTIMANALE & TEMPLATE CON INTEGRAZIONE GEMINI
+# 2. PIANO SETTIMANALE & TEMPLATE CON INTEGRAZIONE GEMINI (MODELLO STABILE)
 # -------------------------------------------------------------------------------------------------
 elif scelta_menu == "🥗 Piano Settimanale & Template":
     res_paz = supabase.table("pazienti").select("id, nome, cognome, codice_fiscale").order("cognome").execute()
@@ -851,7 +851,8 @@ elif scelta_menu == "🥗 Piano Settimanale & Template":
                                 if not testo_file.strip():
                                     st.error("Il file risulta vuoto o non leggibile.")
                                 else:
-                                    model = genai.GenerativeModel('gemini-1.5-flash')
+                                    # Utilizzo del modello stabile standard
+                                    model = genai.GenerativeModel('gemini-1.0-pro')
                                     prompt_ia = (
                                         "Analizza il seguente testo estratto da un piano alimentare. "
                                         "Estrai i giorni della settimana (Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica), "
