@@ -47,11 +47,11 @@ if not os.path.exists(CREDENTIALS_FILE):
 
 st.set_page_config(page_title="Studio Nutrizionale", layout="wide", initial_sidebar_state="collapsed")
 
-# Stile CSS Interfaccia
+# Stile CSS Interfaccia (rimosso il riquadro bianco superiore)
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { display: none; }
-    .block-container { padding-top: 2.0rem !important; padding-bottom: 2.5rem; }
+    .block-container { padding-top: 0.8rem !important; padding-bottom: 2.5rem; }
     
     div[data-testid="stRadio"] > div {
         flex-direction: row;
@@ -92,7 +92,7 @@ st.markdown("""
     .traffic-red { color: #B91C1C; background-color: #FEE2E2; padding: 4px 8px; border-radius: 6px; font-weight: 700; }
     .login-box {
         max-width: 420px;
-        margin: 15px auto;
+        margin: 10px auto;
         padding: 25px;
         background: #FFFFFF;
         border-radius: 14px;
@@ -104,7 +104,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------------------------------------
-# CONTROLLO SESSIONE & GATEWAY DI LOGIN (CON LOGO RIDOTTO E TITOLO SOTTO)
+# CONTROLLO SESSIONE & GATEWAY DI LOGIN (CENTRATO E PULITO)
 # -------------------------------------------------------------------------------------------------
 if "autenticato" not in st.session_state:
     st.session_state["autenticato"] = False
@@ -114,11 +114,11 @@ if not st.session_state["autenticato"]:
     st.markdown("<div class='login-box'>", unsafe_allow_html=True)
     
     if os.path.exists(os.path.join(BASE_DIR, "logo.png")):
-        col_img1, col_img2, col_img3 = st.columns([1, 2.2, 1])
+        col_img1, col_img2, col_img3 = st.columns([1, 1.8, 1])
         with col_img2:
-            st.image(os.path.join(BASE_DIR, "logo.png"), width=130)
+            st.image(os.path.join(BASE_DIR, "logo.png"), width=120)
             
-    st.markdown("<h4 style='color:#1E3A8A; margin-top:5px; margin-bottom:0px;'>Portale Studio Dott. Casa Rodolfo</h4>", unsafe_allow_html=True)
+    st.markdown("<h4 style='color:#1E3A8A; margin-top:8px; margin-bottom:0px;'>Portale Studio Dott. Casa Rodolfo</h4>", unsafe_allow_html=True)
     st.markdown("<p style='color:#64748B; font-size:0.85rem; margin-bottom:15px;'>Studio di Nutrizione Clinica & Metabolismo</p>", unsafe_allow_html=True)
     
     with st.form("form_login"):
@@ -140,7 +140,7 @@ if not st.session_state["autenticato"]:
     st.stop()
 
 # -------------------------------------------------------------------------------------------------
-# INTESTAZIONE SESSIONE UTENTE CON LOGO RIDOTTO, TITOLO E LOGOUT
+# INTESTAZIONE SESSIONE UTENTE CON LOGO & TITOLO CENTRATI
 # -------------------------------------------------------------------------------------------------
 c_logo, c_top_title, c_top_user = st.columns([0.6, 3.4, 1.2])
 with c_logo:
