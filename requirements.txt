@@ -8,3 +8,4 @@ google-genai
 google-api-python-client
 google-auth
 pillow
+google-generativeai>=0.8.0
