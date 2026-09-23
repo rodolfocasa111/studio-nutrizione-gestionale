@@ -6,7 +6,6 @@ import json
 import io
 import zipfile
 import urllib.parse
-import hashlib
 import pandas as pd
 import matplotlib.pyplot as plt
 from fpdf import FPDF
@@ -40,13 +39,13 @@ CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
 if not os.path.exists(CREDENTIALS_FILE):
     CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json.json")
 
-st.set_page_config(page_title="Studio di Nutrizione - Dott. Rodolfo Casa", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Studio Nutrizionale", layout="wide", initial_sidebar_state="collapsed")
 
 # Stile CSS Interfaccia
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { display: none; }
-    .block-container { padding-top: 2rem !important; padding-bottom: 2.5rem; max-width: 900px; }
+    .block-container { padding-top: 2.2rem !important; padding-bottom: 2.5rem; }
     
     div[data-testid="stRadio"] > div {
         flex-direction: row;
@@ -85,206 +84,69 @@ st.markdown("""
     }
     .traffic-green { color: #15803D; background-color: #DCFCE7; padding: 4px 8px; border-radius: 6px; font-weight: 700; }
     .traffic-red { color: #B91C1C; background-color: #FEE2E2; padding: 4px 8px; border-radius: 6px; font-weight: 700; }
+    .login-box {
+        max-width: 420px;
+        margin: 50px auto;
+        padding: 30px;
+        background: #FFFFFF;
+        border-radius: 14px;
+        border: 1px solid #E2E8F0;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+    }
 </style>
 """, unsafe_allow_html=True)
+
+# -------------------------------------------------------------------------------------------------
+# CONTROLLO SESSIONE & GATEWAY DI LOGIN
+# -------------------------------------------------------------------------------------------------
+if "autenticato" not in st.session_state:
+    st.session_state["autenticato"] = False
+    st.session_state["username_attivo"] = ""
+
+if not st.session_state["autenticato"]:
+    st.markdown("<div class='login-box'>", unsafe_allow_html=True)
+    st.markdown("<h2 style='text-align:center; color:#1E3A8A;'>🔒 Accesso Riservato</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:#64748B; font-size:0.9rem;'>Studio di Nutrizione Clinica & Metabolismo</p>", unsafe_allow_html=True)
+    
+    with st.form("form_login"):
+        user_input = st.text_input("Nome Utente", placeholder="es: dott.casa")
+        pwd_input = st.text_input("Password", type="password", placeholder="••••••••")
+        btn_login = st.form_submit_button("Accedi alla Piattaforma", type="primary", use_container_width=True)
+        
+        if btn_login:
+            u_clean = user_input.strip().lower()
+            p_clean = pwd_input.strip()
+            if u_clean == ADMIN_USER and p_clean == ADMIN_PWD:
+                st.session_state["autenticato"] = True
+                st.session_state["username_attivo"] = u_clean
+                st.rerun()
+            else:
+                st.error("Credenziali non valide. Riprova.")
+    
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.stop()
+
+# -------------------------------------------------------------------------------------------------
+# INTESTAZIONE SESSIONE UTENTE CON LOGOUT
+# -------------------------------------------------------------------------------------------------
+c_top_title, c_top_user = st.columns([4, 1.2])
+with c_top_title:
+    st.markdown("<span style='font-weight:700; color:#1E3A8A; font-size:1.1rem;'>🥗 Studio di Nutrizione Clinica & Metabolismo</span>", unsafe_allow_html=True)
+with c_top_user:
+    c_u_name, c_u_btn = st.columns([1.8, 1])
+    with c_u_name:
+        st.write(f"👤 `{st.session_state['username_attivo']}`")
+    with c_u_btn:
+        if st.button("Esci", help="Termina sessione"):
+            st.session_state["autenticato"] = False
+            st.session_state["username_attivo"] = ""
+            st.rerun()
 
 @st.cache_resource
 def init_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 supabase = init_supabase()
-
-def upload_pdf_su_storage(paziente_id, nome_file, pdf_bytes):
-    try:
-        file_path = f"{paziente_id}/{nome_file}"
-        supabase.storage.from_("documenti-clinici").upload(
-            path=file_path,
-            file=pdf_bytes,
-            file_options={"content-type": "application/pdf", "upsert": "true"}
-        )
-    except Exception:
-        pass
-
-# -------------------------------------------------------------------------------------------------
-# CONTROLLO SESSIONE & GATEWAY DI LOGIN / PORTALE PAZIENTE
-# -------------------------------------------------------------------------------------------------
-if "autenticato" not in st.session_state:
-    st.session_state["autenticato"] = False
-    st.session_state["ruolo"] = ""
-    st.session_state["utente_dati"] = None
-
-if not st.session_state["autenticato"]:
-    c_spazio1, c_img, c_spazio2 = st.columns([2, 1.2, 2])
-    with c_img:
-        try:
-            st.image("logo.png", use_container_width=True)
-        except Exception:
-            pass
-
-    st.markdown("<h2 style='text-align:center; color:#1E3A8A; margin-bottom:0px;'>Dott. Rodolfo Casa</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center; color:#2563EB; font-weight:600; font-size:1rem; margin-top:2px;'>Biologo Nutrizionista</p>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center; color:#64748B; font-size:0.9rem;'>Piattaforma Clinica & Portale Paziente</p>", unsafe_allow_html=True)
-    st.markdown("<hr style='margin:20px 0;'>", unsafe_allow_html=True)
-    
-    tab_log_admin, tab_log_paz = st.tabs(["🔐 Accesso Studio (Admin)", "👤 Area Paziente (CF)"])
-    
-    with tab_log_admin:
-        with st.form("form_login_admin"):
-            user_input = st.text_input("Nome Utente", placeholder="es: dott.casa")
-            pwd_input = st.text_input("Password", type="password", placeholder="••••••••")
-            btn_login = st.form_submit_button("Accedi al Gestionale", type="primary", use_container_width=True)
-            
-            if btn_login:
-                u_clean = user_input.strip().lower()
-                p_clean = pwd_input.strip()
-                if u_clean == ADMIN_USER and p_clean == ADMIN_PWD:
-                    st.session_state["autenticato"] = True
-                    st.session_state["ruolo"] = "admin"
-                    st.session_state["username_attivo"] = u_clean
-                    st.session_state["utente_dati"] = {"nome": "Dott. Rodolfo Casa"}
-                    st.rerun()
-                else:
-                    st.error("Credenziali non valide. Riprova.")
-
-    with tab_log_paz:
-        with st.form("form_login_paziente"):
-            cf_input = st.text_input("Inserisci il tuo Codice Fiscale", placeholder="ES: RSSMRA85A01H501W").upper()
-            btn_login_paz = st.form_submit_button("Entra nella tua Area Personale", type="primary", use_container_width=True)
-            
-            if btn_login_paz:
-                cf_clean = cf_input.strip()
-                if cf_clean:
-                    res_paz = supabase.table("pazienti").select("*").eq("codice_fiscale", cf_clean).execute()
-                    if res_paz.data:
-                        st.session_state["autenticato"] = True
-                        st.session_state["ruolo"] = "paziente"
-                        st.session_state["utente_dati"] = res_paz.data[0]
-                        st.rerun()
-                    else:
-                        st.error("Codice Fiscale non trovato nell'archivio dello studio.")
-                else:
-                    st.warning("Inserisci un Codice Fiscale valido.")
-
-    st.stop()
-
-# -------------------------------------------------------------------------------------------------
-# SEZIONE DEDICATA: PORTALE PAZIENTE (SOLA LETTURA)
-# -------------------------------------------------------------------------------------------------
-if st.session_state["ruolo"] == "paziente":
-    paz = st.session_state["utente_dati"]
-    
-    c_p_title, c_p_out = st.columns([4, 1])
-    with c_p_title:
-        st.markdown(f"<h3 style='color:#1E3A8A;'>👋 Benvenuto/a, {paz['nome']} {paz['cognome']}</h3>", unsafe_allow_html=True)
-        st.caption("La tua area personale protetta - Dott. Rodolfo Casa | Biologo Nutrizionista")
-    with c_p_out:
-        st.write("")
-        if st.button("Esci", use_container_width=True):
-            st.session_state["autenticato"] = False
-            st.session_state["ruolo"] = ""
-            st.session_state["utente_dati"] = None
-            st.rerun()
-            
-    st.markdown("---")
-
-    tab_p_piano, tab_p_misure, tab_p_doc = st.tabs(["🥗 Il Mio Piano Nutrizionale", "📈 I Miei Progressi (Peso & BIA)", "📁 I Miei Documenti Clinici"])
-
-    with tab_p_piano:
-        st.markdown("#### 🍽️ Il Tuo Piano Alimentare Settimanale")
-        res_d = supabase.table("diete").select("*").eq("paziente_id", paz["id"]).execute()
-        if res_d.data:
-            dieta_p = res_d.data[0]
-            st.info(f"🎯 **Target Energetico Giornaliero:** `{dieta_p.get('target_kcal') or 2000} kcal` | 💧 **Acqua Consigliata:** `{dieta_p.get('litri_acqua') or 2.0} L/die`")
-            
-            res_v = supabase.table("voci_dieta").select(
-                "giorno_settimana, pasto, grammi, alimenti(nome, energia_kcal, proteine_g, lipidi_g, carboidrati_g)"
-            ).eq("dieta_id", dieta_p["id"]).execute()
-            
-            voci_paz = res_v.data or []
-            if voci_paz:
-                df_vp = pd.DataFrame([{
-                    "Giorno": v["giorno_settimana"], "Pasto": v["pasto"], "Alimento": v["alimenti"]["nome"],
-                    "Grammi": v["grammi"], "Kcal": round(float(v["alimenti"]["energia_kcal"]) * (float(v["grammi"])/100.0), 1)
-                } for v in voci_paz])
-
-                giorni_s = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
-                schede_g = st.tabs(giorni_s)
-                for idx_g, g_nom in enumerate(giorni_s):
-                    with schede_g[idx_g]:
-                        sub_df = df_vp[df_vp["Giorno"] == g_nom]
-                        if not sub_df.empty:
-                            st.write(f"Totale stima giorno: **{sub_df['Kcal'].sum():.0f} kcal**")
-                            for pasto_n in ["Colazione", "Spuntino Mattina", "Pranzo", "Merenda Pomeriggio", "Cena"]:
-                                sp_pasto = sub_df[sub_df["Pasto"] == pasto_n]
-                                if not sp_pasto.empty:
-                                    st.markdown(f"**🍽️ {pasto_n}**")
-                                    for _, row in sp_pasto.iterrows():
-                                        st.write(f"  - {row['Alimento']}: **{row['Grammi']}g** (`{row['Kcal']} kcal`)")
-                        else:
-                            st.write("Nessun alimento inserito per questo giorno.")
-            else:
-                st.warning("Il professionista non ha ancora inserito gli alimenti nel tuo piano settimanale.")
-        else:
-            st.warning("Nessun piano nutrizionale associato al momento.")
-
-    with tab_p_misure:
-        st.markdown("#### 📈 Grafico Andamento Ponderale & Controlli")
-        try:
-            res_m = supabase.table("misure_pazienti").select("*").eq("paziente_id", paz["id"]).order("data_rilevazione").execute()
-            misure_p = res_m.data or []
-        except Exception: misure_p = []
-
-        if misure_p:
-            df_mp = pd.DataFrame(misure_p)
-            fig_paz, ax_paz = plt.subplots(figsize=(7, 3))
-            ax_paz.plot(df_mp["data_rilevazione"], df_mp["peso_kg"], marker='o', color='#2563EB', linewidth=2, label="Peso (kg)")
-            ax_paz.set_title("Andamento del Tuo Peso", fontweight='bold')
-            ax_paz.grid(True, linestyle='--', alpha=0.5)
-            st.pyplot(fig_paz)
-
-            st.dataframe(df_mp[["data_rilevazione", "peso_kg", "circ_vita_cm", "circ_fianchi_cm", "note"]], use_container_width=True)
-        else:
-            st.info("Nessuna misurazione registrata nelle tue visite finora.")
-
-    with tab_p_doc:
-        st.markdown("#### 📁 I Tuoi Documenti Clinici nel Cloud")
-        st.caption("Scarica direttamente i tuoi piani nutrizionali, fatture o moduli di consenso emessi dallo studio.")
-        try:
-            files_list = supabase.storage.from_("documenti-clinici").list(path=f"{paz['id']}")
-            if files_list:
-                for f in files_list:
-                    nome_f = f["name"]
-                    c_f_nome, c_f_btn = st.columns([3, 1])
-                    with c_f_nome:
-                        st.write(f"📄 **{nome_f}**")
-                    with c_f_btn:
-                        file_url = supabase.storage.from_("documenti-clinici").get_public_url(f"{paz['id']}/{nome_f}")
-                        st.link_button("📥 Scarica", file_url, use_container_width=True)
-            else:
-                st.info("Nessun documento presente nel tuo archivio cloud.")
-        except Exception:
-            st.info("Nessun documento disponibile.")
-
-    st.stop()
-
-# -------------------------------------------------------------------------------------------------
-# INTESTAZIONE SESSIONE AMMINISTRATORE (PROFESSIONISTA) CON LOGOUT
-# -------------------------------------------------------------------------------------------------
-c_top_title, c_top_user = st.columns([4, 1.2])
-with c_top_title:
-    st.markdown("<span style='font-weight:700; color:#1E3A8A; font-size:1.1rem;'>🥗 Studio di Nutrizione Clinica & Metabolismo (Admin)</span>", unsafe_allow_html=True)
-with c_top_user:
-    c_u_name, c_u_btn = st.columns([1.8, 1])
-    with c_u_name:
-        nome_vis = st.session_state.get("username_attivo", "dott.casa")
-        st.write(f"👤 `{nome_vis}`")
-    with c_u_btn:
-        if st.button("Esci", help="Termina sessione"):
-            st.session_state["autenticato"] = False
-            st.session_state["ruolo"] = ""
-            if "username_attivo" in st.session_state:
-                del st.session_state["username_attivo"]
-            st.rerun()
 
 def get_calendar_service():
     percorso = CREDENTIALS_FILE
@@ -330,7 +192,7 @@ def elimina_evento_calendar(google_event_id):
     except Exception as e:
         return False, f"Errore Google Calendar: {e}"
 
-# Menu Principale (Admin)
+# Menu Principale
 voci_menu = [
     "👤 Pazienti, Clinica & Promemoria",
     "🥗 Piano Settimanale & Template",
@@ -405,10 +267,7 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
         with st.form("form_paz_new", clear_on_submit=True):
             c1, c2, c3 = st.columns(3)
             with c1: n = st.text_input("Nome*"); cf = st.text_input("Codice Fiscale*").upper()
-            with c2: 
-                c = st.text_input("Cognome*")
-                # CORRETTO: Intervallo data esteso dal 1920 a oggi per evitare errori di limite
-                dn = st.date_input("Data di Nascita", value=date(1990, 1, 1), min_value=date(1920, 1, 1), max_value=date.today())
+            with c2: c = st.text_input("Cognome*"); dn = st.date_input("Data di Nascita", value=date(1975, 1, 1), min_value=date(1920, 1, 1), max_value=date.today())
             with c3: tel = st.text_input("Telefono (es: 3401234567)"); em = st.text_input("Email")
             
             c_ob, _ = st.columns(2)
@@ -843,21 +702,26 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
                 return bytes(pdf.output())
 
             st.write("✍️ **Firma del Paziente nel riquadro sottostante:**")
-            canvas_result = st_canvas(
-                stroke_width=2,
-                stroke_color="#000000",
-                background_color="#F8FAFC",
-                height=150,
-                width=500,
-                drawing_mode="freedraw",
-                key=f"canvas_{p_sel['id']}"
-            )
-
-            firma_pil = None
-            if canvas_result.image_data is not None:
-                img_data = canvas_result.image_data
-                if img_data.max() > 0:
-                    firma_pil = Image.fromarray(img_data.astype('uint8'))
+            
+            # Gestione sicura del canvas senza crash se non supportato da alcune versioni di streamlit-drawable-canvas
+            try:
+                canvas_result = st_canvas(
+                    stroke_width=2,
+                    stroke_color="#000000",
+                    background_color="#F8FAFC",
+                    height=150,
+                    width=500,
+                    drawing_mode="freedraw",
+                    key=f"canvas_{p_sel['id']}"
+                )
+                firma_pil = None
+                if canvas_result.image_data is not None:
+                    img_data = canvas_result.image_data
+                    if img_data.max() > 0:
+                        firma_pil = Image.fromarray(img_data.astype('uint8'))
+            except Exception as e_canvas:
+                st.warning(fModalità firma alternativa attiva (Canvas non caricato: {e_canvas}))
+                firma_pil = None
 
             col_btn_sign1, col_btn_sign2 = st.columns([1.5, 2])
             with col_btn_sign1:
@@ -873,7 +737,7 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
                 if firma_pil:
                     st.success("Firma acquisita e pronta per il PDF!")
                 else:
-                    st.info("Traccia la firma sopra per inserirla direttamente nel foglio.")
+                    st.info("Traccia la firma sopra oppure scarica il modulo standard.")
 
 # -------------------------------------------------------------------------------------------------
 # 2. PIANO SETTIMANALE & TEMPLATE
@@ -1138,7 +1002,7 @@ elif scelta_menu == "🥗 Piano Settimanale & Template":
 # -------------------------------------------------------------------------------------------------
 elif scelta_menu == "🍎 Catalogo Alimenti & Cibi":
     st.subheader("🍎 Database Alimenti & Valori Nutrizionali dello Studio")
-    st.caption(f"Aggiungi o consulta alimenti e prodotti commerciali (valori per 100g di parte edibile)[cite: 1].")
+    st.caption("Aggiungi o consulta alimenti e prodotti commerciali (valori per 100g di parte edibile)[cite: 1].")
 
     tab_elenco_cibi, tab_nuovo_cibo = st.tabs(["📋 Tabella Alimenti dello Studio", "➕ Inserisci Nuovo Alimento / Prodotto"])
 
