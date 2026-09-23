@@ -441,7 +441,7 @@ if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
                 cf = st.text_input("Codice Fiscale*").upper()
             with c2: 
                 c = st.text_input("Cognome*")
-                # CORRETTO: Aggiunti i limiti min_value e max_value
+                # CORRETTO: Intervallo data esteso dal 1920 a oggi
                 dn = st.date_input("Data di Nascita", value=date(1990, 1, 1), min_value=date(1920, 1, 1), max_value=date.today())
             with c3: 
                 tel = st.text_input("Telefono (es: 3401234567)")
