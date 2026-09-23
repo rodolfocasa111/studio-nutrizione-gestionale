@@ -13,6 +13,7 @@ import streamlit.components.v1 as components
 from streamlit_drawable_canvas import st_canvas
 from PIL import Image
 import tempfile
+import google.generativeai as genai
 
 # Google Calendar API
 from google.oauth2 import service_account
@@ -30,6 +31,10 @@ def get_secret(sezione, chiave, default_val):
 SUPABASE_URL = get_secret("supabase", "url", "https://dknyvopqymopodskjmdf.supabase.co")
 SUPABASE_KEY = get_secret("supabase", "key", "sb_publishable_sejaZUC9Yy6Q-DKV6SOIYA_e6VkPyco")
 CALENDAR_ID = get_secret("google", "calendar_id", "rodolfocasa22@gmail.com")
+GEMINI_API_KEY = get_secret("gemini", "api_key", "")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 ADMIN_USER = str(get_secret("auth", "admin_user", "dott.casa")).strip().lower()
 ADMIN_PWD = str(get_secret("auth", "admin_password", "Studio2026!")).strip()
@@ -219,7 +224,7 @@ TABELLA_SOSTITUZIONI = [
 ]
 
 # -------------------------------------------------------------------------------------------------
-# 1. CARTELLA PAZIENTI, METABOLISMO, MISURE, BIA, ESAMI & SINTESI
+# 1. CARTELLA PAZIENTI
 # -------------------------------------------------------------------------------------------------
 if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
     st.subheader("👤 Archivio Clinico, Esami & Comunicazioni Paziente")
@@ -777,9 +782,10 @@ elif scelta_menu == "🥗 Piano Settimanale & Template":
             })
         df_dieta = pd.DataFrame(righe)
 
-        col_tpl_carica, col_tpl_salva = st.columns([2, 2])
+        col_tpl_carica, col_tpl_salva, col_tpl_gemini = st.columns([1.5, 1.5, 2])
+        
         with col_tpl_carica:
-            with st.expander("⚡ Carica Dieta Tipo da Template"):
+            with st.expander("⚡ Carica Dieta Tipo"):
                 try:
                     res_tpl = supabase.table("template_diete").select("*").order("nome").execute()
                     templates = res_tpl.data or []
@@ -787,10 +793,10 @@ elif scelta_menu == "🥗 Piano Settimanale & Template":
 
                 if templates:
                     tpl_map = {f"{t['nome']} (~{t.get('target_kcal') or 2000} kcal)": t for t in templates}
-                    scelto_tpl_str = st.selectbox("Seleziona Dieta Tipo:", list(tpl_map.keys()))
+                    scelto_tpl_str = st.selectbox("Seleziona Template:", list(tpl_map.keys()))
                     tpl_obj = tpl_map[scelto_tpl_str]
                     
-                    if st.button("📥 Applica questo Template al Paziente", type="primary"):
+                    if st.button("📥 Applica al Paziente", type="primary"):
                         supabase.table("voci_dieta").delete().eq("dieta_id", dieta["id"]).execute()
                         voci_tpl = supabase.table("template_voci_dieta").select("*").eq("template_id", tpl_obj["id"]).execute().data or []
                         for vt in voci_tpl:
@@ -798,19 +804,18 @@ elif scelta_menu == "🥗 Piano Settimanale & Template":
                                 "dieta_id": dieta["id"], "giorno_settimana": vt["giorno_settimana"],
                                 "pasto": vt["pasto"], "alimento_id": vt["alimento_id"], "grammi": vt["grammi"]
                             }).execute()
-                        st.success(f"Template '{tpl_obj['nome']}' applicato!")
+                        st.success("Template applicato!")
                         st.rerun()
                 else:
-                    st.info("Nessun template salvato.")
+                    st.info("Nessun template.")
 
         with col_tpl_salva:
-            with st.expander("💾 Salva Settimana come Nuovo Template"):
-                nome_nuovo_tpl = st.text_input("Nome Modello Dieta:", placeholder="Es: Mediterranea Ipocalorica 1600 kcal")
-                desc_nuovo_tpl = st.text_input("Descrizione:", placeholder="Es: 3 allenamenti, carboidrati medi...")
-                if st.button("Salva nei Template"):
+            with st.expander("💾 Salva come Template"):
+                nome_nuovo_tpl = st.text_input("Nome Modello:", placeholder="Es: Ipocalorica 1600")
+                if st.button("Salva Template"):
                     if nome_nuovo_tpl.strip() and not df_dieta.empty:
                         nuovo_t = supabase.table("template_diete").insert({
-                            "nome": nome_nuovo_tpl.strip(), "descrizione": desc_nuovo_tpl.strip(), "target_kcal": float(dieta.get("target_kcal") or 2000.0)
+                            "nome": nome_nuovo_tpl.strip(), "descrizione": "Creato da gestionale", "target_kcal": float(dieta.get("target_kcal") or 2000.0)
                         }).execute().data[0]
                         voci_da_salvare = supabase.table("voci_dieta").select("*").eq("dieta_id", dieta["id"]).execute().data or []
                         for vs in voci_da_salvare:
@@ -818,10 +823,90 @@ elif scelta_menu == "🥗 Piano Settimanale & Template":
                                 "template_id": nuovo_t["id"], "giorno_settimana": vs["giorno_settimana"],
                                 "pasto": vs["pasto"], "alimento_id": vs["alimento_id"], "grammi": vs["grammi"]
                             }).execute()
-                        st.success(f"Template '{nome_nuovo_tpl}' registrato!")
+                        st.success("Template salvato!")
                         st.rerun()
                     else:
-                        st.warning("Inserisci un nome e alimenti nel piano.")
+                        st.warning("Inserisci nome e alimenti.")
+
+        with col_tpl_gemini:
+            with st.expander("✨ Genera Template con AI (Gemini)"):
+                uploaded_file = st.file_uploader("Carica file piano alimentare (PDF o TXT):", type=["pdf", "txt"])
+                nome_gen_tpl = st.text_input("Nome per il nuovo Template AI:", placeholder="Es: Dieta da PDF Esistente")
+                
+                if st.button("🤖 Estrai e Crea Template con AI", type="primary"):
+                    if uploaded_file and nome_gen_tpl.strip():
+                        with st.spinner("Gemini sta analizzando il file e strutturando il template..."):
+                            try:
+                                file_bytes = uploaded_file.read()
+                                model = genai.GenerativeModel('gemini-1.5-flash')
+                                
+                                prompt_ia = (
+                                    "Analizza il documento allegato contenente un piano alimentare. "
+                                    "Estrai i giorni della settimana (Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica), "
+                                    "i pasti (Colazione, Spuntino Mattina, Pranzo, Merenda Pomeriggio, Cena) e gli alimenti con le rispettive grammature. "
+                                    "Restituisci ESCLUSIVAMENTE un oggetto JSON valido con questa struttura esatta:\n"
+                                    "[\n  {\"giorno\": \"Lunedì\", \"pasto\": \"Pranzo\", \"alimento\": \"Nome Alimento Esatto\", \"grammi\": 100},\n...\n]"
+                                )
+                                
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp:
+                                    tmp.write(file_bytes)
+                                    tmp_name = tmp.name
+                                
+                                sample_file = genai.upload_file(path=tmp_name)
+                                response = model.generate_content([sample_file, prompt_ia])
+                                
+                                if os.path.exists(tmp_name): os.remove(tmp_name)
+                                
+                                raw_text = response.text.strip()
+                                if "```json" in raw_text:
+                                    raw_text = raw_text.split("```json")[1].split("```")[0].strip()
+                                elif "```" in raw_text:
+                                    raw_text = raw_text.split("```")[1].split("```")[0].strip()
+                                
+                                dati_estratti = json.loads(raw_text)
+                                
+                                if dati_estratti:
+                                    nuovo_t_ai = supabase.table("template_diete").insert({
+                                        "nome": nome_gen_tpl.strip(), "descrizione": "Generato automaticamente con Gemini AI", "target_kcal": 2000.0
+                                    }).execute().data[0]
+                                    
+                                    res_al_all = supabase.table("alimenti").select("id, nome").execute().data or []
+                                    al_dict = {a["nome"].lower(): a["id"] for a in res_al_all}
+                                    
+                                    inseriti = 0
+                                    for item in dati_estratti:
+                                        alim_nome = item.get("alimento", "").strip().lower()
+                                        grammi = float(item.get("grammi", 100))
+                                        giorno = item.get("giorno", "Lunedì")
+                                        pasto = item.get("pasto", "Pranzo")
+                                        
+                                        match_id = None
+                                        for k, aid in al_dict.items():
+                                            if alim_nome in k or k in alim_nome:
+                                                match_id = aid
+                                                break
+                                        
+                                        if not match_id and res_al_all:
+                                            match_id = res_al_all[0]["id"]
+                                            
+                                        if match_id:
+                                            supabase.table("template_voci_dieta").insert({
+                                                "template_id": nuovo_t_ai["id"],
+                                                "giorno_settimana": giorno,
+                                                "pasto": pasto,
+                                                "alimento_id": match_id,
+                                                "grammi": grammi
+                                            }).execute()
+                                            inseriti += 1
+                                            
+                                    st.success(f"Template '{nome_gen_tpl}' creato con successo tramite IA ({inseriti} voci importate)!")
+                                    st.rerun()
+                                else:
+                                    st.error("Gemini non ha restituito dati validi.")
+                            except Exception as e_ai:
+                                st.error(f"Errore durante l'elaborazione con Gemini: {e_ai}")
+                    else:
+                        st.warning("Carica un file e inserisci un nome per il template.")
 
         with col_btn_pdf:
             st.write("")
