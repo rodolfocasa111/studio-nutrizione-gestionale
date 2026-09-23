@@ -58,7 +58,7 @@ st.markdown("""
 <style>
     [data-testid="stSidebar"] { display: none; }
     .block-container { padding-top: 1.2rem !important; padding-bottom: 2.5rem; }
-    header {visibility: hidden;}
+    header { visibility: hidden; }
     
     div[data-testid="stRadio"] > div {
         flex-direction: row;
@@ -614,7 +614,7 @@ elif st.session_state["ruolo"] == "admin":
                                     "circ_vita_cm": cvita, "circ_fianchi_cm": cfianchi, "circ_coscia_cm": ccoscia, "circ_braccio_cm": cbraccio,
                                     "massa_grassa_kg": fm_kg, "massa_grassa_perc": fm_p, "massa_magra_kg": ffm_kg, "massa_magra_perc": ffm_p,
                                     "acqua_totale_litri": tbw_lt, "angolo_fase": angolo_fase_val, "note": note_m
-                            }).execute()
+                                }).execute()
                                 st.success("Rilevazione e analisi BIA salvate!")
                                 st.rerun()
                             except Exception as err:
@@ -1032,19 +1032,8 @@ elif st.session_state["ruolo"] == "admin":
                                     if not testo_file.strip():
                                         st.error("Il file risulta vuoto o non leggibile.")
                                     else:
-                                        # Selezione dinamica del modello attivo
-                                        nome_modello = "gemini-1.5-flash-latest"
-                                        try:
-                                            modelli_disp = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                                            flash_match = [m for m in modelli_disp if "flash" in m]
-                                            if flash_match:
-                                                nome_modello = flash_match[0]
-                                            elif modelli_disp:
-                                                nome_modello = modelli_disp[0]
-                                        except Exception:
-                                            nome_modello = "gemini-1.5-flash-latest"
-                                            
-                                        model = genai.GenerativeModel(nome_modello)
+                                        # Modello Gemini aggiornato supportato
+                                        model = genai.GenerativeModel('gemini-2.5-flash')
                                         prompt_ia = (
                                             "Analizza il seguente testo estratto da un piano alimentare. "
                                             "Estrai i giorni della settimana (Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica), "
@@ -1221,7 +1210,7 @@ elif st.session_state["ruolo"] == "admin":
     # -------------------------------------------------------------------------------------------------
     elif scelta_menu == "🍎 Catalogo Alimenti & Cibi":
         st.subheader("🍎 Database Alimenti & Valori Nutrizionali dello Studio")
-        st.caption("Aggiungi o consulta alimenti e prodotti commerciali (valori per 100g di parte edibile).")
+        st.caption("Aggiungi o consulta alimenti e prodotti commerciali (valori per 100g di parte edibile)[cite: 1].")
 
         tab_elenco_cibi, tab_nuovo_cibo = st.tabs(["📋 Tabella Alimenti dello Studio", "➕ Inserisci Nuovo Alimento / Prodotto"])
 
@@ -1639,39 +1628,39 @@ elif st.session_state["ruolo"] == "admin":
                         except Exception as err:
                             st.error(f"Errore: {err}")
 
-            with c_metriche:
-                movs = []
-                try:
-                    res_m = supabase.table("movimenti_fiscali").select("*").order("data", desc=True).execute()
-                    movs = res_m.data or []
-                except Exception: movs = []
-                    
-                if movs:
-                    df_m = pd.DataFrame(movs)
-                    tot_in = df_m[df_m["importo"] > 0]["importo"].sum()
-                    tot_out = abs(df_m[df_m["importo"] < 0]["importo"].sum())
-                    utile = tot_in - tot_out
-                    enpab = tot_in * 0.04
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("Totale Incassi", f"€ {tot_in:,.2f}")
-                    m2.metric("Spese Totali", f"€ {tot_out:,.2f}")
-                    m3.metric("Utile Netto", f"€ {utile:,.2f}")
-                    m4.metric("Rivalsa ENPAB (4%)", f"€ {enpab:,.2f}")
-                    st.markdown("---")
-                    st.markdown("#### 📋 Registro Movimenti")
-                    for m in movs:
-                        c_d, c_desc, c_imp, c_met, c_canc = st.columns([1.3, 3, 1.3, 1.8, 1])
-                        c_d.write(f"📅 `{m['data']}`")
-                        c_desc.write(f"**{m['descrizione']}**")
-                        colore_imp = "green" if m["importo"] > 0 else "red"
-                        c_imp.markdown(f"<span style='color:{colore_imp}; font-weight:700;'>€ {float(m['importo']):.2f}</span>", unsafe_allow_html=True)
-                        c_met.write(f"_{m.get('metodo') or 'N/D'}_")
-                        if c_canc.button("🗑️", key=f"del_mov_{m['id']}", help="Elimina"):
-                            supabase.table("movimenti_fiscali").delete().eq("id", m["id"]).execute()
-                            st.success("Eliminato!")
-                            st.rerun()
-                else:
-                    st.info("Nessun movimento presente nel registro.")
+        with c_metriche:
+            movs = []
+            try:
+                res_m = supabase.table("movimenti_fiscali").select("*").order("data", desc=True).execute()
+                movs = res_m.data or []
+            except Exception: movs = []
+                
+            if movs:
+                df_m = pd.DataFrame(movs)
+                tot_in = df_m[df_m["importo"] > 0]["importo"].sum()
+                tot_out = abs(df_m[df_m["importo"] < 0]["importo"].sum())
+                utile = tot_in - tot_out
+                enpab = tot_in * 0.04
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Totale Incassi", f"€ {tot_in:,.2f}")
+                m2.metric("Spese Totali", f"€ {tot_out:,.2f}")
+                m3.metric("Utile Netto", f"€ {utile:,.2f}")
+                m4.metric("Rivalsa ENPAB (4%)", f"€ {enpab:,.2f}")
+                st.markdown("---")
+                st.markdown("#### 📋 Registro Movimenti")
+                for m in movs:
+                    c_d, c_desc, c_imp, c_met, c_canc = st.columns([1.3, 3, 1.3, 1.8, 1])
+                    c_d.write(f"📅 `{m['data']}`")
+                    c_desc.write(f"**{m['descrizione']}**")
+                    colore_imp = "green" if m["importo"] > 0 else "red"
+                    c_imp.markdown(f"<span style='color:{colore_imp}; font-weight:700;'>€ {float(m['importo']):.2f}</span>", unsafe_allow_html=True)
+                    c_met.write(f"_{m.get('metodo') or 'N/D'}_")
+                    if c_canc.button("🗑️", key=f"del_mov_{m['id']}", help="Elimina"):
+                        supabase.table("movimenti_fiscali").delete().eq("id", m["id"]).execute()
+                        st.success("Eliminato!")
+                        st.rerun()
+            else:
+                st.info("Nessun movimento presente nel registro.")
 
     # -------------------------------------------------------------------------------------------------
     # 7. BACKUP & DISASTER RECOVERY (MEDICO)
