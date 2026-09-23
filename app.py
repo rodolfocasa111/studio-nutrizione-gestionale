@@ -1033,7 +1033,7 @@ elif st.session_state["ruolo"] == "admin":
                                         st.error("Il file risulta vuoto o non leggibile.")
                                     else:
                                         # Modello Gemini aggiornato supportato
-                                        model = genai.GenerativeModel('gemini-2.5-flash')
+                                        model = genai.GenerativeModel('gemini-3.6-flash')
                                         prompt_ia = (
                                             "Analizza il seguente testo estratto da un piano alimentare. "
                                             "Estrai i giorni della settimana (Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica), "
@@ -1210,7 +1210,7 @@ elif st.session_state["ruolo"] == "admin":
     # -------------------------------------------------------------------------------------------------
     elif scelta_menu == "🍎 Catalogo Alimenti & Cibi":
         st.subheader("🍎 Database Alimenti & Valori Nutrizionali dello Studio")
-        st.caption("Aggiungi o consulta alimenti e prodotti commerciali (valori per 100g di parte edibile)[cite: 1].")
+        st.caption("Aggiungi o consulta alimenti e prodotti commerciali (valori per 100g di parte edibile).")
 
         tab_elenco_cibi, tab_nuovo_cibo = st.tabs(["📋 Tabella Alimenti dello Studio", "➕ Inserisci Nuovo Alimento / Prodotto"])
 
@@ -1525,59 +1525,59 @@ elif st.session_state["ruolo"] == "admin":
                         self.set_font('Helvetica', 'I', 8)
                         self.cell(self.epw, 10, f'Pagina {self.page_no()}', align='C')
 
-                def crea_pdf_fattura():
-                    pdf = PDFFattura()
-                    pdf.add_page()
-                    w_utile = pdf.epw
+            def crea_pdf_fattura():
+                pdf = PDFFattura()
+                pdf.add_page()
+                w_utile = pdf.epw
 
-                    pdf.set_font("Helvetica", "B", 12)
-                    pdf.cell(w_utile, 7, f"FATTURA SANITARIA N. {num_fat} del {data_fat.strftime('%d/%m/%Y')}", new_x="LMARGIN", new_y="NEXT")
-                    pdf.ln(3)
-                    pdf.set_font("Helvetica", "B", 10)
-                    pdf.cell(w_utile, 5, "DATI DEL CLIENTE / PAZIENTE:", new_x="LMARGIN", new_y="NEXT")
-                    pdf.set_font("Helvetica", "", 9)
-                    pdf.cell(w_utile, 5, f"Nome e Cognome: {paz_fat['cognome']} {paz_fat['nome']}", new_x="LMARGIN", new_y="NEXT")
-                    pdf.cell(w_utile, 5, f"Codice Fiscale: {paz_fat.get('codice_fiscale') or 'N/D'}", new_x="LMARGIN", new_y="NEXT")
-                    pdf.cell(w_utile, 5, f"Modalita' Pagamento: {metodo_pag}", new_x="LMARGIN", new_y="NEXT")
-                    pdf.ln(6)
-                    pdf.set_font("Helvetica", "B", 9)
-                    pdf.set_fill_color(240, 240, 240)
-                    pdf.cell(w_utile * 0.75, 6, "  Descrizione Prestazione", border=1, fill=True)
-                    pdf.cell(w_utile * 0.25, 6, "Importo", border=1, fill=True, align='R', new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("Helvetica", "B", 12)
+                pdf.cell(w_utile, 7, f"FATTURA SANITARIA N. {num_fat} del {data_fat.strftime('%d/%m/%Y')}", new_x="LMARGIN", new_y="NEXT")
+                pdf.ln(3)
+                pdf.set_font("Helvetica", "B", 10)
+                pdf.cell(w_utile, 5, "DATI DEL CLIENTE / PAZIENTE:", new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("Helvetica", "", 9)
+                pdf.cell(w_utile, 5, f"Nome e Cognome: {paz_fat['cognome']} {paz_fat['nome']}", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(w_utile, 5, f"Codice Fiscale: {paz_fat.get('codice_fiscale') or 'N/D'}", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(w_utile, 5, f"Modalita' Pagamento: {metodo_pag}", new_x="LMARGIN", new_y="NEXT")
+                pdf.ln(6)
+                pdf.set_font("Helvetica", "B", 9)
+                pdf.set_fill_color(240, 240, 240)
+                pdf.cell(w_utile * 0.75, 6, "  Descrizione Prestazione", border=1, fill=True)
+                pdf.cell(w_utile * 0.25, 6, "Importo", border=1, fill=True, align='R', new_x="LMARGIN", new_y="NEXT")
 
-                    pdf.set_font("Helvetica", "", 9)
-                    pdf.cell(w_utile * 0.75, 6, f"  {desc_prestazione}", border=1)
-                    pdf.cell(w_utile * 0.25, 6, f"E {onorario_base:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
-                    pdf.cell(w_utile * 0.75, 6, "  Contributo Integrativo ENPAB (4%)", border=1)
-                    pdf.cell(w_utile * 0.25, 6, f"E {rivalsa_enpab:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
-                    if marca_da_bollo > 0:
-                        pdf.cell(w_utile * 0.75, 6, "  Imposta di bollo assolta sull'originale (D.M. 17/06/2014)", border=1)
-                        pdf.cell(w_utile * 0.25, 6, f"E {marca_da_bollo:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
-                    pdf.set_font("Helvetica", "B", 10)
-                    pdf.cell(w_utile * 0.75, 7, "  TOTALE DOVUTO", border=1, fill=True)
-                    pdf.cell(w_utile * 0.25, 7, f"E {totale_da_pagare:.2f}  ", border=1, fill=True, align='R', new_x="LMARGIN", new_y="NEXT")
-                    pdf.ln(6)
-                    pdf.set_font("Helvetica", "I", 8)
-                    pdf.multi_cell(w_utile, 4, "Operazione esente da IVA ai sensi dell'art. 10, comma 1, n. 18 del D.P.R. 633/1972. Spesa sanitaria detraibile con pagamento tracciabile.", new_x="LMARGIN", new_y="NEXT")
-                    return bytes(pdf.output())
+                pdf.set_font("Helvetica", "", 9)
+                pdf.cell(w_utile * 0.75, 6, f"  {desc_prestazione}", border=1)
+                pdf.cell(w_utile * 0.25, 6, f"E {onorario_base:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(w_utile * 0.75, 6, "  Contributo Integrativo ENPAB (4%)", border=1)
+                pdf.cell(w_utile * 0.25, 6, f"E {rivalsa_enpab:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
+                if marca_da_bollo > 0:
+                    pdf.cell(w_utile * 0.75, 6, "  Imposta di bollo assolta sull'originale (D.M. 17/06/2014)", border=1)
+                    pdf.cell(w_utile * 0.25, 6, f"E {marca_da_bollo:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("Helvetica", "B", 10)
+                pdf.cell(w_utile * 0.75, 7, "  TOTALE DOVUTO", border=1, fill=True)
+                pdf.cell(w_utile * 0.25, 7, f"E {totale_da_pagare:.2f}  ", border=1, fill=True, align='R', new_x="LMARGIN", new_y="NEXT")
+                pdf.ln(6)
+                pdf.set_font("Helvetica", "I", 8)
+                pdf.multi_cell(w_utile, 4, "Operazione esente da IVA ai sensi dell'art. 10, comma 1, n. 18 del D.P.R. 633/1972. Spesa sanitaria detraibile con pagamento tracciabile.", new_x="LMARGIN", new_y="NEXT")
+                return bytes(pdf.output())
 
-                col_btn_f1, col_btn_f2 = st.columns([1.5, 2])
-                with col_btn_f1:
-                    st.download_button("📥 Scarica Fattura Sanitaria (PDF)", crea_pdf_fattura(), file_name=f"Fattura_{num_fat}_{paz_fat['cognome']}.pdf", mime="application/pdf", type="primary", use_container_width=True)
-                with col_btn_f2:
-                    if st.button("💾 Registra Incasso nel Registro Economico", use_container_width=True):
-                        try:
-                            supabase.table("movimenti_fiscali").insert({
-                                "descrizione": f"Fattura {num_fat} - {paz_fat['cognome']} {paz_fat['nome']} (CF: {paz_fat.get('codice_fiscale')})",
-                                "importo": totale_da_pagare,
-                                "tipo": "ENTRATA",
-                                "data": str(data_fat),
-                                "metodo": metodo_pag
-                            }).execute()
-                            st.success("Fattura archiviata nel registro delle entrate!")
-                            st.rerun()
-                        except Exception as err:
-                            st.error(f"Errore registrazione: {err}")
+            col_btn_f1, col_btn_f2 = st.columns([1.5, 2])
+            with col_btn_f1:
+                st.download_button("📥 Scarica Fattura Sanitaria (PDF)", crea_pdf_fattura(), file_name=f"Fattura_{num_fat}_{paz_fat['cognome']}.pdf", mime="application/pdf", type="primary", use_container_width=True)
+            with col_btn_f2:
+                if st.button("💾 Registra Incasso nel Registro Economico", use_container_width=True):
+                    try:
+                        supabase.table("movimenti_fiscali").insert({
+                            "descrizione": f"Fattura {num_fat} - {paz_fat['cognome']} {paz_fat['nome']} (CF: {paz_fat.get('codice_fiscale')})",
+                            "importo": totale_da_pagare,
+                            "tipo": "ENTRATA",
+                            "data": str(data_fat),
+                            "metodo": metodo_pag
+                        }).execute()
+                        st.success("Fattura archiviata nel registro delle entrate!")
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Errore registrazione: {err}")
 
         with tab_sts:
             st.markdown("#### 🏛️ Generatore Tracciato Sistema Tessera Sanitaria (MEF)")
@@ -1586,25 +1586,25 @@ elif st.session_state["ruolo"] == "admin":
                 mov_entrate = res_sts.data or []
             except Exception: mov_entrate = []
 
-            if mov_entrate:
-                righe_sts = []
-                for e in mov_entrate:
-                    cf_estratto = "NON INDICATO"
-                    if "CF:" in e["descrizione"]:
-                        cf_estratto = e["descrizione"].split("CF:")[1].replace(")", "").strip()
-                    righe_sts.append({
-                        "Data Emissione": e["data"],
-                        "Numero Fattura / Descrizione": e["descrizione"],
-                        "Codice Fiscale Paziente": cf_estratto,
-                        "Importo Totale (€)": e["importo"],
-                        "Pagamento Tracciato": "Sì" if e.get("metodo") != "Contanti" else "No",
-                        "Tipo Spesa": "SP (Spesa Sanitaria)"
-                    })
-                df_sts = pd.DataFrame(righe_sts)
-                st.dataframe(df_sts, use_container_width=True)
-                st.download_button("📥 Scarica Tracciato Spese Sistema TS (CSV)", df_sts.to_csv(index=False).encode('utf-8'), file_name=f"Tracciato_Sistema_TS_{date.today().year}.csv", mime="text/csv", type="primary")
-            else:
-                st.info("Nessuna fattura emessa registrata.")
+        if mov_entrate:
+            righe_sts = []
+            for e in mov_entrate:
+                cf_estratto = "NON INDICATO"
+                if "CF:" in e["descrizione"]:
+                    cf_estratto = e["descrizione"].split("CF:")[1].replace(")", "").strip()
+                righe_sts.append({
+                    "Data Emissione": e["data"],
+                    "Numero Fattura / Descrizione": e["descrizione"],
+                    "Codice Fiscale Paziente": cf_estratto,
+                    "Importo Totale (€)": e["importo"],
+                    "Pagamento Tracciato": "Sì" if e.get("metodo") != "Contanti" else "No",
+                    "Tipo Spesa": "SP (Spesa Sanitaria)"
+                })
+            df_sts = pd.DataFrame(righe_sts)
+            st.dataframe(df_sts, use_container_width=True)
+            st.download_button("📥 Scarica Tracciato Spese Sistema TS (CSV)", df_sts.to_csv(index=False).encode('utf-8'), file_name=f"Tracciato_Sistema_TS_{date.today().year}.csv", mime="text/csv", type="primary")
+        else:
+            st.info("Nessuna fattura emessa registrata.")
 
         with tab_registro:
             c_form, c_metriche = st.columns([1.1, 2.3])
@@ -1628,39 +1628,39 @@ elif st.session_state["ruolo"] == "admin":
                         except Exception as err:
                             st.error(f"Errore: {err}")
 
-        with c_metriche:
-            movs = []
-            try:
-                res_m = supabase.table("movimenti_fiscali").select("*").order("data", desc=True).execute()
-                movs = res_m.data or []
-            except Exception: movs = []
-                
-            if movs:
-                df_m = pd.DataFrame(movs)
-                tot_in = df_m[df_m["importo"] > 0]["importo"].sum()
-                tot_out = abs(df_m[df_m["importo"] < 0]["importo"].sum())
-                utile = tot_in - tot_out
-                enpab = tot_in * 0.04
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Totale Incassi", f"€ {tot_in:,.2f}")
-                m2.metric("Spese Totali", f"€ {tot_out:,.2f}")
-                m3.metric("Utile Netto", f"€ {utile:,.2f}")
-                m4.metric("Rivalsa ENPAB (4%)", f"€ {enpab:,.2f}")
-                st.markdown("---")
-                st.markdown("#### 📋 Registro Movimenti")
-                for m in movs:
-                    c_d, c_desc, c_imp, c_met, c_canc = st.columns([1.3, 3, 1.3, 1.8, 1])
-                    c_d.write(f"📅 `{m['data']}`")
-                    c_desc.write(f"**{m['descrizione']}**")
-                    colore_imp = "green" if m["importo"] > 0 else "red"
-                    c_imp.markdown(f"<span style='color:{colore_imp}; font-weight:700;'>€ {float(m['importo']):.2f}</span>", unsafe_allow_html=True)
-                    c_met.write(f"_{m.get('metodo') or 'N/D'}_")
-                    if c_canc.button("🗑️", key=f"del_mov_{m['id']}", help="Elimina"):
-                        supabase.table("movimenti_fiscali").delete().eq("id", m["id"]).execute()
-                        st.success("Eliminato!")
-                        st.rerun()
-            else:
-                st.info("Nessun movimento presente nel registro.")
+            with c_metriche:
+                movs = []
+                try:
+                    res_m = supabase.table("movimenti_fiscali").select("*").order("data", desc=True).execute()
+                    movs = res_m.data or []
+                except Exception: movs = []
+                    
+                if movs:
+                    df_m = pd.DataFrame(movs)
+                    tot_in = df_m[df_m["importo"] > 0]["importo"].sum()
+                    tot_out = abs(df_m[df_m["importo"] < 0]["importo"].sum())
+                    utile = tot_in - tot_out
+                    enpab = tot_in * 0.04
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Totale Incassi", f"€ {tot_in:,.2f}")
+                    m2.metric("Spese Totali", f"€ {tot_out:,.2f}")
+                    m3.metric("Utile Netto", f"€ {utile:,.2f}")
+                    m4.metric("Rivalsa ENPAB (4%)", f"€ {enpab:,.2f}")
+                    st.markdown("---")
+                    st.markdown("#### 📋 Registro Movimenti")
+                    for m in movs:
+                        c_d, c_desc, c_imp, c_met, c_canc = st.columns([1.3, 3, 1.3, 1.8, 1])
+                        c_d.write(f"📅 `{m['data']}`")
+                        c_desc.write(f"**{m['descrizione']}**")
+                        colore_imp = "green" if m["importo"] > 0 else "red"
+                        c_imp.markdown(f"<span style='color:{colore_imp}; font-weight:700;'>€ {float(m['importo']):.2f}</span>", unsafe_allow_html=True)
+                        c_met.write(f"_{m.get('metodo') or 'N/D'}_")
+                        if c_canc.button("🗑️", key=f"del_mov_{m['id']}", help="Elimina"):
+                            supabase.table("movimenti_fiscali").delete().eq("id", m["id"]).execute()
+                            st.success("Eliminato!")
+                            st.rerun()
+                else:
+                    st.info("Nessun movimento presente nel registro.")
 
     # -------------------------------------------------------------------------------------------------
     # 7. BACKUP & DISASTER RECOVERY (MEDICO)
