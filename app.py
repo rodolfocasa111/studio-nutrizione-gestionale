@@ -40,8 +40,10 @@ def get_secret(sezione, chiave, default_val=None):
         pass
     return default_val
 
-SUPABASE_URL = get_secret("supabase", "url")
-SUPABASE_KEY = get_secret("supabase", "key")   # usare la service_role key + RLS attiva (vedi db/migrazione_sicurezza.sql)
+SUPABASE_URL = str(get_secret("supabase", "url") or "").strip().rstrip("/")
+if SUPABASE_URL.endswith("/rest/v1"):
+    SUPABASE_URL = SUPABASE_URL[:-len("/rest/v1")]
+SUPABASE_KEY = str(get_secret("supabase", "key") or "").strip()   # usare la service_role key + RLS attiva (vedi db/migrazione_sicurezza.sql)
 CALENDAR_ID = get_secret("google", "calendar_id")
 GEMINI_API_KEY = str(get_secret("gemini", "api_key", "") or "").strip()
 GEMINI_MODEL = str(get_secret("gemini", "model", "gemini-2.5-flash"))
@@ -74,9 +76,24 @@ if _mancanti:
              ". Impostali in .streamlit/secrets.toml (o nei Secrets di Streamlit Cloud).")
     st.stop()
 
+if "supabase.com/dashboard" in SUPABASE_URL:  # errore frequente: incollato il link del dashboard invece dell'URL API
+    _ref = SUPABASE_URL.split("/project/")[-1].split("/")[0] if "/project/" in SUPABASE_URL else "<id-progetto>"
+    st.error(f"`supabase.url` contiene il link del dashboard. Serve l'URL dell'API: **https://{_ref}.supabase.co** "
+             "(lo trovi in Supabase → Project Settings → API → Project URL). Correggilo nei secret e riavvia l'app.")
+    st.stop()
+
+if not SUPABASE_URL.startswith(("http://", "https://")) or "<" in SUPABASE_URL:
+    st.error("`supabase.url` non è valido: deve avere la forma https://<id-progetto>.supabase.co "
+             "(con https:// e senza segnaposto). Correggilo nei secret e riavvia l'app.")
+    st.stop()
+
 @st.cache_resource
 def init_supabase() -> Client:
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    try:  # timeout esplicito: un database irraggiungibile non deve bloccare l'app all'infinito
+        from supabase.client import ClientOptions
+        return create_client(SUPABASE_URL, SUPABASE_KEY, options=ClientOptions(postgrest_client_timeout=15))
+    except ImportError:
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 supabase = init_supabase()
 
@@ -281,6 +298,31 @@ with c_top_user:
             st.rerun()
 
 st.markdown("---")
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _errore_database():
+    """None se il database risponde, altrimenti (tipo errore, messaggio breve)."""
+    try:
+        supabase.table("pazienti").select("id").limit(1).execute()
+        return None
+    except Exception as e:
+        return type(e).__name__, str(getattr(e, "message", "") or e)[:200]
+
+_err_db = _errore_database()
+if _err_db:
+    from urllib.parse import urlparse
+    _tipo, _msg = _err_db
+    st.error(f"Impossibile collegarsi al database ({_tipo}) su «{urlparse(SUPABASE_URL).hostname}».")
+    if "Connect" in _tipo or "Timeout" in _tipo:
+        st.info("Il server non risponde o l'indirizzo non esiste: controlla `supabase.url` nei secret e verifica su "
+                "supabase.com che il progetto non sia in pausa (in quel caso premi «Restore project»).")
+    else:
+        st.info("Il server risponde ma rifiuta la richiesta: controlla che `supabase.key` sia la chiave **service_role** "
+                "e che le tabelle esistano. Dettaglio: " + _msg)
+    if st.button("🔄 Riprova"):
+        st.cache_data.clear()
+        st.rerun()
+    st.stop()
 
 if "_flash" in st.session_state:
     _msg_flash = st.session_state.pop("_flash")
