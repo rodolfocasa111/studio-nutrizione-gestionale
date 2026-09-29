@@ -304,3 +304,30 @@ def test_template_vuoto_non_cancella_la_dieta(fake, monkeypatch):
     at = clic(at, "Applica al Paziente")
     assert len(fake.db["voci_dieta"]) == 1
     assert any("vuoto" in w.value for w in at.warning)
+
+
+class ClientIrraggiungibile:
+    def table(self, _):
+        raise ConnectionError("[Errno -2] Name or service not known")
+
+
+def test_database_irraggiungibile_messaggio_chiaro(fake, monkeypatch):
+    sys.modules["supabase"].create_client = lambda url, key, **kw: ClientIrraggiungibile()
+    at = nuova_app(monkeypatch).run()
+    at = login_admin(at)
+    assert at.session_state["autenticato"] is True
+    assert any("Impossibile collegarsi al database" in e.value for e in at.error)
+    assert any("supabase.url" in i.value for i in at.info)
+    assert not at.exception
+
+
+def test_url_dashboard_riconosciuto(fake, monkeypatch):
+    s = {**SECRETS, "supabase": {"url": "https://supabase.com/dashboard/project/abcdefgh", "key": "k"}}
+    at = nuova_app(monkeypatch, s).run()
+    assert any("https://abcdefgh.supabase.co" in e.value for e in at.error)
+
+
+def test_url_con_segnaposto_rifiutato(fake, monkeypatch):
+    s = {**SECRETS, "supabase": {"url": "https://<progetto>.supabase.co", "key": "k"}}
+    at = nuova_app(monkeypatch, s).run()
+    assert any("non è valido" in e.value for e in at.error)
