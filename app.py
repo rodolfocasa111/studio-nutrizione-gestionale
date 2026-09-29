@@ -4,25 +4,35 @@ from datetime import date, datetime, timedelta
 import os
 import json
 import io
-import re
 import zipfile
+import time
 import urllib.parse
 import pandas as pd
 import matplotlib.pyplot as plt
 from fpdf import FPDF
 import streamlit.components.v1 as components
-from streamlit_drawable_canvas import st_canvas
 from PIL import Image
-import tempfile
-import google.generativeai as genai
+from google import genai
 import pypdf
+
+try:  # componente non piu' mantenuto: un suo malfunzionamento non deve bloccare l'app
+    from streamlit_drawable_canvas import st_canvas
+except Exception:
+    st_canvas = None
 
 # Google Calendar API
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-# --- CONFIGURAZIONI & CREDENZIALI CON FALLBACK SICURO ---
-def get_secret(sezione, chiave, default_val):
+from logic import (
+    GIORNI, PASTI, OBIETTIVI_CLINICI, oggi, esc, json_per_script, normalizza_cf, cf_valido,
+    normalizza_telefono, estrai_cf, hash_pin, verifica_pin, confronto_costante, calcola_bmr_tdee,
+    eta_da_data_nascita, calcola_fattura, enpab_contenuta_negli_incassi, prossimo_numero_fattura,
+    pdf_safe, fetch_all, parse_grammi, trova_alimento,
+)
+
+# --- CONFIGURAZIONI & CREDENZIALI (nessun valore di default: tutto arriva da st.secrets) ---
+def get_secret(sezione, chiave, default_val=None):
     try:
         if hasattr(st, "secrets") and sezione in st.secrets:
             return st.secrets[sezione].get(chiave, default_val)
@@ -30,16 +40,25 @@ def get_secret(sezione, chiave, default_val):
         pass
     return default_val
 
-SUPABASE_URL = get_secret("supabase", "url", "https://dknyvopqymopodskjmdf.supabase.co")
-SUPABASE_KEY = get_secret("supabase", "key", "sb_publishable_sejaZUC9Yy6Q-DKV6SOIYA_e6VkPyco")
-CALENDAR_ID = get_secret("google", "calendar_id", "rodolfocasa22@gmail.com")
-GEMINI_API_KEY = str(get_secret("gemini", "api_key", "")).strip()
+SUPABASE_URL = get_secret("supabase", "url")
+SUPABASE_KEY = get_secret("supabase", "key")   # usare la service_role key + RLS attiva (vedi db/migrazione_sicurezza.sql)
+CALENDAR_ID = get_secret("google", "calendar_id")
+GEMINI_API_KEY = str(get_secret("gemini", "api_key", "") or "").strip()
+GEMINI_MODEL = str(get_secret("gemini", "model", "gemini-2.5-flash"))
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+ADMIN_USER = str(get_secret("auth", "admin_user", "") or "").strip().lower()
+ADMIN_PWD = str(get_secret("auth", "admin_password", "") or "").strip()
+# Transizione: finche' un paziente non ha un PIN, il solo CF e' accettato. Impostare false per pretendere il PIN.
+ACCESSO_SENZA_PIN = bool(get_secret("auth", "consenti_accesso_senza_pin", True))
 
-ADMIN_USER = str(get_secret("auth", "admin_user", "dott.casa")).strip().lower()
-ADMIN_PWD = str(get_secret("auth", "admin_password", "Studio2026!")).strip()
+STUDIO = {  # dati emittente della fattura (sezione [studio] nei secrets)
+    "nome": get_secret("studio", "nome", "STUDIO DI NUTRIZIONE CLINICA"),
+    "titolare": get_secret("studio", "titolare", ""),
+    "piva": get_secret("studio", "partita_iva", ""),
+    "cf": get_secret("studio", "codice_fiscale", ""),
+    "indirizzo": get_secret("studio", "indirizzo", ""),
+    "albo": get_secret("studio", "iscrizione_albo", ""),
+}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
@@ -48,11 +67,51 @@ if not os.path.exists(CREDENTIALS_FILE):
 
 st.set_page_config(page_title="Portale Studio Nutrizionale", layout="wide", initial_sidebar_state="collapsed")
 
+_mancanti = [n for n, v in [("supabase.url", SUPABASE_URL), ("supabase.key", SUPABASE_KEY),
+                            ("auth.admin_user", ADMIN_USER), ("auth.admin_password", ADMIN_PWD)] if not v]
+if _mancanti:
+    st.error("Configurazione incompleta: mancano i secret " + ", ".join(_mancanti) +
+             ". Impostali in .streamlit/secrets.toml (o nei Secrets di Streamlit Cloud).")
+    st.stop()
+
 @st.cache_resource
 def init_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 supabase = init_supabase()
+
+# --- Protezione dai tentativi di accesso ripetuti (condivisa tra tutte le sessioni del processo) ---
+MAX_TENTATIVI, FINESTRA_TENTATIVI_S = 5, 900
+
+@st.cache_resource
+def _registro_tentativi() -> dict:
+    return {}
+
+def accesso_bloccato(chiave: str) -> bool:
+    ora = time.time()
+    recenti = [x for x in _registro_tentativi().get(chiave, []) if ora - x < FINESTRA_TENTATIVI_S]
+    _registro_tentativi()[chiave] = recenti
+    return len(recenti) >= MAX_TENTATIVI
+
+def registra_fallimento(chiave: str):
+    _registro_tentativi().setdefault(chiave, []).append(time.time())
+
+def azzera_tentativi(chiave: str):
+    _registro_tentativi().pop(chiave, None)
+
+def flash_rerun(messaggio: str):
+    """Mostra il messaggio dopo il rerun (st.success + st.rerun non si vedrebbe mai)."""
+    st.session_state["_flash"] = messaggio
+    st.rerun()
+
+def mostra_fig(fig):
+    st.pyplot(fig)
+    plt.close(fig)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def carica_alimenti():
+    return fetch_all(supabase, "alimenti", "*", order="nome")
+
 
 # Stile CSS Interfaccia
 st.markdown("""
@@ -137,23 +196,42 @@ if not st.session_state["autenticato"]:
         tab_paz, tab_med = st.tabs(["👤 Accesso Pazienti", "🩺 Area Medica"])
         
         with tab_paz:
-            st.info("Inserisci il tuo **Codice Fiscale** per consultare la tua dieta e monitorare i tuoi progressi.")
+            st.info("Inserisci il tuo **Codice Fiscale** e il **PIN** fornito dallo studio per consultare la tua dieta e monitorare i tuoi progressi.")
             with st.form("form_login_paziente"):
-                cf_input = st.text_input("Codice Fiscale", placeholder="es. RSSMRA80A01H501U").strip().upper()
+                cf_input = normalizza_cf(st.text_input("Codice Fiscale", placeholder="es. RSSMRA80A01H501U"))
+                pin_input = st.text_input("PIN di accesso", type="password", placeholder="PIN")
                 btn_paz = st.form_submit_button("Accedi al Tuo Portale", type="primary", use_container_width=True)
                 
                 if btn_paz:
-                    if cf_input:
-                        res_paziente = supabase.table("pazienti").select("*").eq("codice_fiscale", cf_input).execute()
-                        if res_paziente.data:
+                    chiave = f"paz:{cf_input}"
+                    if not cf_input:
+                        st.warning("Inserisci il Codice Fiscale.")
+                    elif accesso_bloccato(chiave):
+                        st.error("Troppi tentativi. Riprova tra qualche minuto o contatta lo studio.")
+                    else:
+                        ok, paziente_ok = False, None
+                        try:
+                            trovati = supabase.table("pazienti").select("*").eq("codice_fiscale", cf_input).execute().data or []
+                        except Exception:
+                            trovati = []
+                            st.error("Servizio momentaneamente non disponibile. Riprova più tardi.")
+                        # CF assente o duplicato (ambiguo): rifiuto sempre, con messaggio generico
+                        if len(trovati) == 1:
+                            cand = trovati[0]
+                            if cand.get("pin_accesso"):
+                                ok = verifica_pin(pin_input.strip(), cf_input, cand["pin_accesso"])
+                            else:
+                                ok = ACCESSO_SENZA_PIN
+                            paziente_ok = cand
+                        if ok:
+                            azzera_tentativi(chiave)
                             st.session_state["autenticato"] = True
                             st.session_state["ruolo"] = "paziente"
-                            st.session_state["dati_paziente"] = res_paziente.data[0]
+                            st.session_state["dati_paziente"] = {k: v for k, v in paziente_ok.items() if k != "pin_accesso"}
                             st.rerun()
                         else:
-                            st.error("Codice Fiscale non trovato nell'archivio dello studio.")
-                    else:
-                        st.warning("Inserisci il Codice Fiscale.")
+                            registra_fallimento(chiave)
+                            st.error("Credenziali non valide.")
                         
         with tab_med:
             with st.form("form_login_medico"):
@@ -162,15 +240,23 @@ if not st.session_state["autenticato"]:
                 btn_med = st.form_submit_button("Accedi al Gestionale", type="primary", use_container_width=True)
                 
                 if btn_med:
-                    u_clean = user_input.strip().lower()
-                    p_clean = pwd_input.strip()
-                    if u_clean == ADMIN_USER and p_clean == ADMIN_PWD:
-                        st.session_state["autenticato"] = True
-                        st.session_state["ruolo"] = "admin"
-                        st.session_state["username_attivo"] = u_clean
-                        st.rerun()
+                    if accesso_bloccato("admin"):
+                        st.error("Troppi tentativi. Riprova tra qualche minuto.")
                     else:
-                        st.error("Credenziali medico non valide.")
+                        u_clean = user_input.strip().lower()
+                        p_clean = pwd_input.strip()
+                        # entrambe le verifiche vengono sempre eseguite (tempo costante)
+                        ok_u = confronto_costante(u_clean, ADMIN_USER)
+                        ok_p = confronto_costante(p_clean, ADMIN_PWD)
+                        if ok_u and ok_p:
+                            azzera_tentativi("admin")
+                            st.session_state["autenticato"] = True
+                            st.session_state["ruolo"] = "admin"
+                            st.session_state["username_attivo"] = u_clean
+                            st.rerun()
+                        else:
+                            registra_fallimento("admin")
+                            st.error("Credenziali medico non valide.")
         
         st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
@@ -191,15 +277,17 @@ with c_top_user:
         st.write(f"👤 `{nome_mostrato}`")
     with c_u_btn:
         if st.button("Esci", help="Termina sessione"):
-            st.session_state["autenticato"] = False
-            st.session_state["ruolo"] = ""
-            st.session_state["dati_paziente"] = None
+            st.session_state.clear()
             st.rerun()
 
 st.markdown("---")
 
+if "_flash" in st.session_state:
+    _msg_flash = st.session_state.pop("_flash")
+    (st.warning if any(k in _msg_flash for k in ("NON ", "Attenzione")) else st.success)(_msg_flash)
+
 # Definizioni Comuni
-giorni_settimana = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+giorni_settimana = GIORNI
 TABELLA_SOSTITUZIONI = [
     {"Gruppo": "Carboidrati Complessi", "Opzioni": "80g Pasta = 80g Riso = 90g Farro/Orzo = 100g Pane Integrale = 300g Patate"},
     {"Gruppo": "Fonti Proteiche Bianche", "Opzioni": "150g Petto di Pollo = 150g Tacchino = 160g Vitello Magro = 200g Merluzzo/Nasello"},
@@ -208,9 +296,52 @@ TABELLA_SOSTITUZIONI = [
     {"Gruppo": "Grassi di Condimento", "Opzioni": "10g Olio Extravergine d'Oliva (1 cucchiaio) = 15g Frutta secca a guscio (noci/mandorle)"}
 ]
 
+class SafePDF(FPDF):
+    """FPDF con font core (latin-1): sostituisce i caratteri non supportati invece di andare in errore."""
+    def cell(self, *args, **kwargs):
+        args = list(args)
+        if len(args) >= 3:
+            args[2] = pdf_safe(args[2])
+        for k in ("text", "txt"):
+            if k in kwargs:
+                kwargs[k] = pdf_safe(kwargs[k])
+        return super().cell(*args, **kwargs)
+
+    def multi_cell(self, *args, **kwargs):
+        args = list(args)
+        if len(args) >= 3:
+            args[2] = pdf_safe(args[2])
+        for k in ("text", "txt"):
+            if k in kwargs:
+                kwargs[k] = pdf_safe(kwargs[k])
+        return super().multi_cell(*args, **kwargs)
+
+
+def costruisci_righe_dieta(voci):
+    """Trasforma le voci_dieta (con join su alimenti) in righe per il DataFrame; salta le voci orfane."""
+    righe = []
+    for v in voci or []:
+        al = v.get("alimenti")
+        if not al:
+            continue
+        try:
+            f = float(v["grammi"]) / 100.0
+            righe.append({
+                "id": v["id"], "Giorno": v["giorno_settimana"], "Pasto": v["pasto"], "Alimento": al["nome"],
+                "Grammi": v["grammi"], "Kcal": round(float(al["energia_kcal"] or 0) * f, 1),
+                "Proteine": round(float(al["proteine_g"] or 0) * f, 1),
+                "Carboidrati": round(float(al["carboidrati_g"] or 0) * f, 1),
+                "Grassi": round(float(al["lipidi_g"] or 0) * f, 1),
+            })
+        except (TypeError, ValueError):
+            continue
+    return righe
+
+SELECT_VOCI = "id, giorno_settimana, pasto, grammi, alimenti(nome, energia_kcal, proteine_g, lipidi_g, carboidrati_g, fibra_g)"
+
 # Funzione per generazione PDF Dieta
 def genera_pdf_dieta_comune(paziente, dieta, df_dieta):
-    class PDFPianoCompleto(FPDF):
+    class PDFPianoCompleto(SafePDF):
         def header(self):
             self.set_font('Helvetica', 'B', 14)
             self.cell(self.epw, 7, 'STUDIO DI NUTRIZIONE CLINICA - DOTT. CASA RODOLFO', align='C', new_x="LMARGIN", new_y="NEXT")
@@ -230,7 +361,7 @@ def genera_pdf_dieta_comune(paziente, dieta, df_dieta):
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(w_utile, 5, f"Paziente: {paziente['cognome']} {paziente['nome']} | CF: {paziente.get('codice_fiscale') or 'N/D'}", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 8.5)
-    pdf.cell(w_utile, 5, f"Data Rilascio: {date.today().strftime('%d/%m/%Y')} | Target: {dieta.get('target_kcal')} kcal | Acqua: {dieta.get('litri_acqua')} L/die", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(w_utile, 5, f"Data Rilascio: {oggi().strftime('%d/%m/%Y')} | Target: {dieta.get('target_kcal')} kcal | Acqua: {dieta.get('litri_acqua')} L/die", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
 
     for g in giorni_settimana:
@@ -245,7 +376,7 @@ def genera_pdf_dieta_comune(paziente, dieta, df_dieta):
                 pdf.cell(w_utile, 4.5, f"    * {p}:", new_x="LMARGIN", new_y="NEXT")
                 pdf.set_font("Helvetica", "", 8)
                 for _, r in sp.iterrows():
-                    pdf.cell(w_utile, 4, f"       - {r['Alimento']}: {r['Grammi']}g ({r['Kcal']} kcal | P:{r['Proteine']}g C:{r['Carboidrati']}g G:{r['Grassi']}g)", new_x="LMARGIN", new_y="NEXT")
+                    pdf.multi_cell(w_utile, 4, f"       - {r['Alimento']}: {r['Grammi']}g ({r['Kcal']} kcal | P:{r['Proteine']}g C:{r['Carboidrati']}g G:{r['Grassi']}g)", new_x="LMARGIN", new_y="NEXT")
             pdf.ln(1.5)
 
     pdf.add_page()
@@ -286,23 +417,18 @@ if st.session_state["ruolo"] == "paziente":
     tab_mia_dieta, tab_miei_progressi = st.tabs(["🥗 La Mia Dieta", "📈 I Miei Progressi"])
     
     with tab_mia_dieta:
-        res_d = supabase.table("diete").select("*").eq("paziente_id", paziente["id"]).execute()
-        
-        if res_d.data:
-            dieta_paz = res_d.data[0]
-            res_voci = supabase.table("voci_dieta").select("id, giorno_settimana, pasto, grammi, alimenti(nome, energia_kcal, proteine_g, lipidi_g, carboidrati_g, fibra_g)").eq("dieta_id", dieta_paz["id"]).execute()
-            
-            righe = []
-            for v in (res_voci.data or []):
-                al = v["alimenti"]
-                f = float(v["grammi"]) / 100.0
-                righe.append({
-                    "Giorno": v["giorno_settimana"], "Pasto": v["pasto"], "Alimento": al["nome"],
-                    "Grammi": v["grammi"], "Kcal": round(float(al["energia_kcal"]) * f, 1),
-                    "Proteine": round(float(al["proteine_g"]) * f, 1), "Carboidrati": round(float(al["carboidrati_g"]) * f, 1),
-                    "Grassi": round(float(al["lipidi_g"]) * f, 1)
-                })
-            df_dieta_paz = pd.DataFrame(righe)
+        try:
+            res_d = supabase.table("diete").select("*").eq("paziente_id", paziente["id"]).order("id").execute()
+            dieta_paz = res_d.data[0] if res_d.data else None
+            voci_paz = fetch_all(supabase, "voci_dieta", SELECT_VOCI, filtri={"dieta_id": dieta_paz["id"]}) if dieta_paz else []
+            errore_dati = False
+        except Exception:
+            dieta_paz, voci_paz, errore_dati = None, [], True
+
+        if errore_dati:
+            st.error("Impossibile caricare la dieta al momento. Riprova più tardi.")
+        elif dieta_paz:
+            df_dieta_paz = pd.DataFrame(costruisci_righe_dieta(voci_paz))
             
             col_pdf, _ = st.columns([1, 2])
             with col_pdf:
@@ -329,19 +455,26 @@ if st.session_state["ruolo"] == "paziente":
             st.info("Nessuna dieta assegnata al momento.")
             
     with tab_miei_progressi:
-        res_mis = supabase.table("misure_pazienti").select("*").eq("paziente_id", paziente["id"]).order("data_rilevazione").execute()
-        dati_misure = res_mis.data or []
+        try:
+            dati_misure = fetch_all(supabase, "misure_pazienti", "*", order="data_rilevazione", filtri={"paziente_id": paziente["id"]})
+        except Exception:
+            dati_misure = []
+            st.error("Impossibile caricare le misurazioni al momento.")
         if dati_misure:
             df_m = pd.DataFrame(dati_misure)
+            df_m["data_rilevazione"] = pd.to_datetime(df_m["data_rilevazione"])
             st.markdown("### Il tuo andamento del Peso (Kg)")
             fig_p, ax_p = plt.subplots(figsize=(8, 3))
             ax_p.plot(df_m["data_rilevazione"], df_m["peso_kg"], marker='o', color='#2563EB', linewidth=2)
             ax_p.set_title("Variazione Ponderale nel Tempo", fontweight='bold')
             ax_p.grid(True, linestyle='--', alpha=0.5)
-            st.pyplot(fig_p)
+            fig_p.autofmt_xdate()
+            mostra_fig(fig_p)
             
             st.write("##### Storico Rilevazioni:")
-            st.dataframe(df_m[["data_rilevazione", "peso_kg", "circ_vita_cm", "circ_fianchi_cm"]], use_container_width=True)
+            vista = df_m[["data_rilevazione", "peso_kg", "circ_vita_cm", "circ_fianchi_cm"]].copy()
+            vista["data_rilevazione"] = vista["data_rilevazione"].dt.strftime("%d/%m/%Y")
+            st.dataframe(vista, use_container_width=True)
         else:
             st.info("Non ci sono ancora misurazioni registrate per tracciare il tuo progresso.")
 
@@ -359,37 +492,42 @@ elif st.session_state["ruolo"] == "admin":
         "💶 Resoconto & Fatturazione Sanitaria",
         "💾 Backup & Dati Studio"
     ]
-    scelta_menu = st.radio("", voci_menu, horizontal=True, label_visibility="collapsed")
+    scelta_menu = st.radio("Menu", voci_menu, horizontal=True, label_visibility="collapsed")
     st.markdown("---")
 
     def get_calendar_service():
-        percorso = CREDENTIALS_FILE
-        if not os.path.exists(percorso):
-            alt = os.path.join(BASE_DIR, "credentials.json.json")
-            if os.path.exists(alt): percorso = alt
-            else: return None
+        """Credenziali dal secret [gcp_service_account] (consigliato) oppure da credentials.json locale."""
+        scopes = ['https://www.googleapis.com/auth/calendar']
         try:
-            scopes = ['https://www.googleapis.com/auth/calendar']
-            creds = service_account.Credentials.from_service_account_file(percorso, scopes=scopes)
-            return build('calendar', 'v3', credentials=creds)
-        except Exception:
-            return None
+            if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
+                creds = service_account.Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
+            elif os.path.exists(CREDENTIALS_FILE):
+                creds = service_account.Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+            else:
+                return None, "Credenziali Google non configurate (secret gcp_service_account o credentials.json)"
+            return build('calendar', 'v3', credentials=creds), None
+        except Exception as e:
+            return None, f"Credenziali Google non valide: {e}"
+
+    # Google accetta al massimo 40320 minuti (4 settimane) di anticipo per i promemoria
+    PROMEMORIA_CALENDAR = [
+        {'method': 'email', 'minutes': 40320},
+        {'method': 'popup', 'minutes': 14400},
+        {'method': 'popup', 'minutes': 7200},
+    ]
 
     def crea_evento_calendar(titolo, data_str, descrizione=""):
-        service = get_calendar_service()
-        if not service: return None, "File credenziali non trovato"
+        if not CALENDAR_ID:
+            return None, "calendar_id non configurato nei secrets"
+        service, err = get_calendar_service()
+        if not service:
+            return None, err
         try:
+            fine = (date.fromisoformat(data_str) + timedelta(days=1)).isoformat()  # per gli eventi all-day la fine e' esclusiva
             evento = {
                 'summary': titolo, 'description': descrizione,
-                'start': {'date': data_str}, 'end': {'date': data_str},
-                'reminders': {
-                    'useDefault': False,
-                    'overrides': [
-                        {'method': 'email', 'minutes': 43200},
-                        {'method': 'popup', 'minutes': 14400},
-                        {'method': 'popup', 'minutes': 7200},
-                    ],
-                },
+                'start': {'date': data_str}, 'end': {'date': fine},
+                'reminders': {'useDefault': False, 'overrides': PROMEMORIA_CALENDAR},
             }
             res = service.events().insert(calendarId=CALENDAR_ID, body=evento).execute()
             return res.get("id"), "Sincronizzato su Google Calendar!"
@@ -398,8 +536,8 @@ elif st.session_state["ruolo"] == "admin":
 
     def elimina_evento_calendar(google_event_id):
         if not google_event_id: return True, "Nessun ID Google associato"
-        service = get_calendar_service()
-        if not service: return False, "File credenziali mancante"
+        service, err = get_calendar_service()
+        if not service: return False, err
         try:
             service.events().delete(calendarId=CALENDAR_ID, eventId=google_event_id).execute()
             return True, "Eliminato da Google Calendar"
@@ -411,14 +549,16 @@ elif st.session_state["ruolo"] == "admin":
     # -------------------------------------------------------------------------------------------------
     if scelta_menu == "👤 Pazienti, Clinica & Promemoria":
         st.subheader("👤 Archivio Clinico, Esami & Comunicazioni Paziente")
-        res_paz = supabase.table("pazienti").select("*").order("cognome").execute()
-        lista_pazienti = res_paz.data or []
+        lista_pazienti = fetch_all(supabase, "pazienti", "*", order="cognome")
+        n_senza_pin = sum(1 for p in lista_pazienti if not p.get("pin_accesso"))
+        if n_senza_pin:
+            st.info(f"🔐 {n_senza_pin} pazienti non hanno ancora un PIN di accesso al portale: impostalo dalla loro cartella (tab «Cartella Clinica & Note»).")
 
         c_ricerca, c_selettore, c_btn_nuovo = st.columns([1.5, 2.5, 1])
         with c_ricerca:
             filtro_paz = st.text_input("🔍 Cerca Paziente:", placeholder="Cognome o Codice Fiscale...").lower()
         
-        filtrati = [p for p in lista_pazienti if filtro_paz in f"{p.get('cognome','')} {p.get('nome','')} {p.get('codice_fiscale','')}".lower()]
+        filtrati = [p for p in lista_pazienti if filtro_paz in f"{p.get('cognome') or ''} {p.get('nome') or ''} {p.get('codice_fiscale') or ''}".lower()]
         
         with c_selettore:
             if filtrati:
@@ -435,49 +575,59 @@ elif st.session_state["ruolo"] == "admin":
             apri_nuovo = st.checkbox("➕ Nuovo Paziente", value=False)
 
         if p_sel and not apri_nuovo:
-            raw_tel = str(p_sel.get('telefono') or '').replace(" ", "").replace("-", "").replace(".", "")
-            if raw_tel.startswith("+"): tel_wa = raw_tel.replace("+", "")
-            elif raw_tel.startswith("3"): tel_wa = "39" + raw_tel
-            else: tel_wa = raw_tel
+            tel_wa = normalizza_telefono(p_sel.get('telefono'))
 
             st.markdown(f"""
             <div class="patient-header-box">
-                <span style="font-size: 1.25rem; font-weight: 700; color: #1E3A8A;">{p_sel['cognome']} {p_sel['nome']}</span>
-                &nbsp;&nbsp;|&nbsp;&nbsp;<b>CF:</b> <code>{p_sel.get('codice_fiscale') or 'N/D'}</code>
-                &nbsp;&nbsp;|&nbsp;&nbsp;<b>Nascita:</b> {p_sel.get('data_nascita') or 'N/D'}
-                &nbsp;&nbsp;|&nbsp;&nbsp;<b>Tel:</b> {p_sel.get('telefono') or 'N/D'}
-                &nbsp;&nbsp;|&nbsp;&nbsp;<b>Email:</b> {p_sel.get('email') or 'N/D'}
+                <span style="font-size: 1.25rem; font-weight: 700; color: #1E3A8A;">{esc(p_sel['cognome'])} {esc(p_sel['nome'])}</span>
+                &nbsp;&nbsp;|&nbsp;&nbsp;<b>CF:</b> <code>{esc(p_sel.get('codice_fiscale') or 'N/D')}</code>
+                &nbsp;&nbsp;|&nbsp;&nbsp;<b>Nascita:</b> {esc(p_sel.get('data_nascita') or 'N/D')}
+                &nbsp;&nbsp;|&nbsp;&nbsp;<b>Tel:</b> {esc(p_sel.get('telefono') or 'N/D')}
+                &nbsp;&nbsp;|&nbsp;&nbsp;<b>Email:</b> {esc(p_sel.get('email') or 'N/D')}
             </div>
             """, unsafe_allow_html=True)
 
         if apri_nuovo:
             st.markdown("### ➕ Registrazione Nuovo Paziente")
-            with st.form("form_paz_new", clear_on_submit=True):
+            with st.form("form_paz_new", clear_on_submit=False):
                 c1, c2, c3 = st.columns(3)
                 with c1: n = st.text_input("Nome*"); cf = st.text_input("Codice Fiscale*").upper()
-                with c2: c = st.text_input("Cognome*"); dn = st.date_input("Data di Nascita", value=date(1975, 1, 1), min_value=date(1920, 1, 1), max_value=date.today())
+                with c2: c = st.text_input("Cognome*"); dn = st.date_input("Data di Nascita", value=date(1975, 1, 1), min_value=date(1920, 1, 1), max_value=oggi())
                 with c3: tel = st.text_input("Telefono (es: 3401234567)"); em = st.text_input("Email")
                 
                 c_ob, _ = st.columns(2)
                 with c_ob:
-                    ob_clin = st.selectbox("Obiettivo Primario:", ["Dimagrimento / Ricomposizione", "Aumento Massa Muscolare", "Nutrizione Clinica / Patologie", "Mantenimento / Rieducazione"])
+                    ob_clin = st.selectbox("Obiettivo Primario:", OBIETTIVI_CLINICI)
 
                 ca1, ca2 = st.columns(2)
                 with ca1: an_pat = st.text_area("Anamnesi Patologica / Farmaci", height=100)
                 with ca2: an_alim = st.text_area("Abitudini Alimentari / Intolleranze", height=100)
                 note_v = st.text_area("Note Visita / Obiettivi", height=70)
+                pin_nuovo = st.text_input("PIN di accesso al portale (min. 4 cifre)", type="password")
                 if st.form_submit_button("Salva Paziente", type="primary"):
-                    if n and c:
-                        supabase.table("pazienti").insert({
-                            "nome": n.strip(), "cognome": c.strip(), "codice_fiscale": cf.strip(),
-                            "data_nascita": str(dn), "telefono": tel.strip(), "email": em.strip(),
-                            "anamnesi_generale": an_pat, "anamnesi_alimentare": an_alim, "note_visita": note_v,
-                            "obiettivo_clinico": ob_clin
-                        }).execute()
-                        st.success("Paziente registrato!")
-                        st.rerun()
+                    cf_norm = normalizza_cf(cf)
+                    if not (n.strip() and c.strip()):
+                        st.error("Nome e Cognome sono obbligatori.")
+                    elif not cf_valido(cf_norm):
+                        st.error("Codice Fiscale mancante o in formato non valido (16 caratteri).")
+                    elif pin_nuovo and (len(pin_nuovo) < 4 or not pin_nuovo.isdigit()):
+                        st.error("Il PIN deve contenere almeno 4 cifre.")
+                    elif supabase.table("pazienti").select("id").eq("codice_fiscale", cf_norm).execute().data:
+                        st.error("Esiste già un paziente con questo Codice Fiscale.")
                     else:
-                        st.error("Nome e Cognome obbligatori.")
+                        try:
+                            nuovo = {
+                                "nome": n.strip(), "cognome": c.strip(), "codice_fiscale": cf_norm,
+                                "data_nascita": str(dn), "telefono": tel.strip(), "email": em.strip(),
+                                "anamnesi_generale": an_pat, "anamnesi_alimentare": an_alim, "note_visita": note_v,
+                                "obiettivo_clinico": ob_clin
+                            }
+                            if pin_nuovo:
+                                nuovo["pin_accesso"] = hash_pin(pin_nuovo, cf_norm)
+                            supabase.table("pazienti").insert(nuovo).execute()
+                            flash_rerun("Paziente registrato!")
+                        except Exception as err:
+                            st.error(f"Errore salvataggio: {err}")
         elif p_sel:
             tab_scheda, tab_bmr, tab_misure, tab_esami, tab_msg, tab_sintesi, tab_consenso = st.tabs([
                 "📋 Cartella Clinica & Note", 
@@ -495,9 +645,9 @@ elif st.session_state["ruolo"] == "admin":
                 
                 c_ob_up, _ = st.columns(2)
                 with c_ob_up:
-                    curr_ob = p_sel.get("obiettivo_clinico") or "Dimagrimento / Ricomposizione"
-                    idx_ob = ["Dimagrimento / Ricomposizione", "Aumento Massa Muscolare", "Nutrizione Clinica / Patologie", "Mantenimento / Rieducazione"].index(curr_ob) if curr_ob in ["Dimagrimento / Ricomposizione", "Aumento Massa Muscolare", "Nutrizione Clinica / Patologie", "Mantenimento / Rieducazione"] else 0
-                    up_ob = st.selectbox("Obiettivo Primario:", ["Dimagrimento / Ricomposizione", "Aumento Massa Muscolare", "Nutrizione Clinica / Patologie", "Mantenimento / Rieducazione"], index=idx_ob, key=f"up_ob_{p_sel['id']}")
+                    curr_ob = p_sel.get("obiettivo_clinico") or OBIETTIVI_CLINICI[0]
+                    idx_ob = OBIETTIVI_CLINICI.index(curr_ob) if curr_ob in OBIETTIVI_CLINICI else 0
+                    up_ob = st.selectbox("Obiettivo Primario:", OBIETTIVI_CLINICI, index=idx_ob, key=f"up_ob_{p_sel['id']}")
 
                 up_note = st.text_area("Note di Visita & Obiettivi", value=p_sel.get("note_visita") or "", height=80, key=f"up_note_{p_sel['id']}")
                 if st.button("💾 Salva Modifiche Cartella", type="primary", key=f"btn_save_{p_sel['id']}"):
@@ -506,13 +656,31 @@ elif st.session_state["ruolo"] == "admin":
                     }).eq("id", p_sel["id"]).execute()
                     st.success("Cartella clinica salvata!")
 
+                with st.expander("🔐 PIN di accesso al portale paziente"):
+                    st.caption("Stato: " + ("PIN impostato" if p_sel.get("pin_accesso") else "nessun PIN (accesso con solo Codice Fiscale)"))
+                    nuovo_pin = st.text_input("Nuovo PIN (almeno 4 cifre)", type="password", key=f"pin_{p_sel['id']}")
+                    if st.button("Imposta / Reimposta PIN", key=f"btn_pin_{p_sel['id']}"):
+                        if not cf_valido(p_sel.get("codice_fiscale")):
+                            st.error("Il paziente non ha un Codice Fiscale valido: correggilo prima di impostare il PIN.")
+                        elif len(nuovo_pin) < 4 or not nuovo_pin.isdigit():
+                            st.error("Il PIN deve contenere almeno 4 cifre.")
+                        else:
+                            try:
+                                supabase.table("pazienti").update({"pin_accesso": hash_pin(nuovo_pin, p_sel["codice_fiscale"])}).eq("id", p_sel["id"]).execute()
+                                flash_rerun("PIN impostato. Comunicalo al paziente.")
+                            except Exception as err:
+                                st.error(f"Errore (esiste la colonna pin_accesso? vedi db/migrazione_sicurezza.sql): {err}")
+
             with tab_bmr:
                 st.markdown("#### Calcolatore Energetico (Mifflin-St Jeor) & Ripartizione Macronutrienti")
                 c_b1, c_b2, c_b3, c_b4 = st.columns(4)
-                with c_b1: sesso = st.selectbox("Sesso Biologico:", ["Maschio", "Femmina"])
-                with c_b2: peso_kg = st.number_input("Peso Attuale (kg):", min_value=30.0, max_value=250.0, value=75.0, step=0.5)
-                with c_b3: altezza_cm = st.number_input("Altezza (cm):", min_value=120.0, max_value=220.0, value=175.0, step=0.5)
-                with c_b4: eta = st.number_input("Età (anni):", min_value=10, max_value=110, value=30, step=1)
+                with c_b1: sesso = st.selectbox("Sesso Biologico:", ["Maschio", "Femmina"], key=f"bmr_sesso_{p_sel['id']}")
+                with c_b2: peso_kg = st.number_input("Peso Attuale (kg):", min_value=30.0, max_value=250.0, value=75.0, step=0.5, key=f"bmr_peso_{p_sel['id']}")
+                with c_b3: altezza_cm = st.number_input("Altezza (cm):", min_value=120.0, max_value=220.0, value=175.0, step=0.5, key=f"bmr_alt_{p_sel['id']}")
+                with c_b4:
+                    eta_cartella = eta_da_data_nascita(p_sel.get("data_nascita"))
+                    eta_def = min(110, max(10, eta_cartella)) if eta_cartella else 30
+                    eta = st.number_input("Età (anni):", min_value=10, max_value=110, value=eta_def, step=1, key=f"bmr_eta_{p_sel['id']}")
 
                 laf = st.select_slider("Livello Attività Fisica (LAF):", options=["Sedentario (1.20)", "Leggero (1.375)", "Moderato (1.55)", "Intenso (1.725)", "Molto Attivo (1.90)"], value="Sedentario (1.20)")
                 molt_laf = 1.20
@@ -521,9 +689,7 @@ elif st.session_state["ruolo"] == "admin":
                 elif "1.725" in laf: molt_laf = 1.725
                 elif "1.90" in laf: molt_laf = 1.90
 
-                bmr = (10 * peso_kg) + (6.25 * altezza_cm) - (5 * eta) + (5 if sesso == "Maschio" else -161)
-                tdee = bmr * molt_laf
-                bmi = peso_kg / ((altezza_cm / 100.0) ** 2)
+                bmr, tdee, bmi = calcola_bmr_tdee(sesso, peso_kg, altezza_cm, eta, molt_laf)
 
                 st.markdown("---")
                 m_res1, m_res2, m_res3 = st.columns(3)
@@ -551,6 +717,8 @@ elif st.session_state["ruolo"] == "admin":
                     kcal_fat_calc = (kcal_target_calc * (perc_fat / 100.0))
                     grammi_fat_calc = kcal_fat_calc / 9.0
 
+                if kcal_target_calc - kcal_p_calc - kcal_fat_calc < 0:
+                    st.warning("Proteine e lipidi superano le kcal target: i carboidrati sono azzerati e i macro non sommano al target. Riduci proteine o lipidi.")
                 kcal_carb_calc = max(0.0, kcal_target_calc - kcal_p_calc - kcal_fat_calc)
                 grammi_carb_calc = kcal_carb_calc / 4.0
                 litri_h2o_calc = round(peso_kg * 0.035, 1)
@@ -564,7 +732,7 @@ elif st.session_state["ruolo"] == "admin":
                 c_tr5.metric("Acqua", f"{litri_h2o_calc} L/die")
 
                 if st.button("🚀 APPLICA AUTOMATICAMENTE AL PIANO NUTRIZIONALE", type="primary", use_container_width=True):
-                    res_d_check = supabase.table("diete").select("id").eq("paziente_id", p_sel["id"]).execute()
+                    res_d_check = supabase.table("diete").select("id").eq("paziente_id", p_sel["id"]).order("id").execute()
                     dati_target = {
                         "target_kcal": round(kcal_target_calc, 1), "target_proteine_g": round(grammi_p_calc, 1),
                         "target_carboidrati_g": round(grammi_carb_calc, 1), "target_grassi_g": round(grammi_fat_calc, 1),
@@ -584,57 +752,63 @@ elif st.session_state["ruolo"] == "admin":
                         st.write("**1. Peso e Circonferenze Corporee**")
                         c_m1, c_m2, c_m3 = st.columns(3)
                         with c_m1:
-                            data_m = st.date_input("Data Visita", value=date.today())
-                            p_mis = st.number_input("Peso Corporeo (kg)*", min_value=30.0, value=75.0, step=0.1)
+                            data_m = st.date_input("Data Visita", value=oggi())
+                            p_mis = st.number_input("Peso Corporeo (kg)*", min_value=30.0, value=None, step=0.1)
                         with c_m2:
-                            cvita = st.number_input("Circ. Vita (cm)", min_value=40.0, value=82.0, step=0.5)
-                            cfianchi = st.number_input("Circ. Fianchi (cm)", min_value=50.0, value=98.0, step=0.5)
+                            cvita = st.number_input("Circ. Vita (cm)", min_value=40.0, value=None, step=0.5)
+                            cfianchi = st.number_input("Circ. Fianchi (cm)", min_value=50.0, value=None, step=0.5)
                         with c_m3:
-                            ccoscia = st.number_input("Circ. Coscia (cm)", min_value=30.0, value=55.0, step=0.5)
-                            cbraccio = st.number_input("Circ. Braccio (cm)", min_value=15.0, value=30.0, step=0.5)
+                            ccoscia = st.number_input("Circ. Coscia (cm)", min_value=30.0, value=None, step=0.5)
+                            cbraccio = st.number_input("Circ. Braccio (cm)", min_value=15.0, value=None, step=0.5)
                         
                         st.write("**2. Parametri Bioimpedenziometrici (BIA)**")
                         c_bia1, c_bia2, c_bia3, c_bia4 = st.columns(4)
                         with c_bia1:
-                            fm_kg = st.number_input("Massa Grassa - FM (kg)", min_value=0.0, value=15.0, step=0.1)
+                            fm_kg = st.number_input("Massa Grassa - FM (kg)", min_value=0.0, value=None, step=0.1)
                         with c_bia2:
-                            ffm_kg = st.number_input("Massa Magra - FFM (kg)", min_value=0.0, value=60.0, step=0.1)
+                            ffm_kg = st.number_input("Massa Magra - FFM (kg)", min_value=0.0, value=None, step=0.1)
                         with c_bia3:
-                            tbw_lt = st.number_input("Acqua Corporea - TBW (L)", min_value=0.0, value=44.0, step=0.1)
+                            tbw_lt = st.number_input("Acqua Corporea - TBW (L)", min_value=0.0, value=None, step=0.1)
                         with c_bia4:
-                            angolo_fase_val = st.number_input("Angolo di Fase (deg)", min_value=0.0, max_value=15.0, value=6.5, step=0.1)
+                            angolo_fase_val = st.number_input("Angolo di Fase (deg)", min_value=0.0, max_value=15.0, value=None, step=0.1)
 
                         note_m = st.text_input("Note Controllo (es: Buona aderenza, inizio integrazione...)")
                         
                         if st.form_submit_button("Salva Rilevazione Completa", type="primary"):
-                            fm_p = round((fm_kg / p_mis) * 100.0, 1) if p_mis > 0 else 0.0
-                            ffm_p = round((ffm_kg / p_mis) * 100.0, 1) if p_mis > 0 else 0.0
-                            try:
-                                supabase.table("misure_pazienti").insert({
-                                    "paziente_id": p_sel["id"], "data_rilevazione": str(data_m), "peso_kg": p_mis,
-                                    "circ_vita_cm": cvita, "circ_fianchi_cm": cfianchi, "circ_coscia_cm": ccoscia, "circ_braccio_cm": cbraccio,
-                                    "massa_grassa_kg": fm_kg, "massa_grassa_perc": fm_p, "massa_magra_kg": ffm_kg, "massa_magra_perc": ffm_p,
-                                    "acqua_totale_litri": tbw_lt, "angolo_fase": angolo_fase_val, "note": note_m
-                                }).execute()
-                                st.success("Rilevazione e analisi BIA salvate!")
-                                st.rerun()
-                            except Exception as err:
-                                st.error(f"Errore: {err}")
+                            if not p_mis:
+                                st.error("Il peso è obbligatorio.")
+                            elif fm_kg is not None and ffm_kg is not None and abs((fm_kg + ffm_kg) - p_mis) > max(2.0, p_mis * 0.05):
+                                st.error(f"Incoerenza BIA: massa grassa + magra ({fm_kg + ffm_kg:.1f} kg) differisce dal peso ({p_mis:.1f} kg). Controlla i valori.")
+                            else:
+                                fm_p = round((fm_kg / p_mis) * 100.0, 1) if fm_kg is not None else None
+                                ffm_p = round((ffm_kg / p_mis) * 100.0, 1) if ffm_kg is not None else None
+                                try:
+                                    supabase.table("misure_pazienti").insert({
+                                        "paziente_id": p_sel["id"], "data_rilevazione": str(data_m), "peso_kg": p_mis,
+                                        "circ_vita_cm": cvita, "circ_fianchi_cm": cfianchi, "circ_coscia_cm": ccoscia, "circ_braccio_cm": cbraccio,
+                                        "massa_grassa_kg": fm_kg, "massa_grassa_perc": fm_p, "massa_magra_kg": ffm_kg, "massa_magra_perc": ffm_p,
+                                        "acqua_totale_litri": tbw_lt, "angolo_fase": angolo_fase_val, "note": note_m
+                                    }).execute()
+                                    flash_rerun("Rilevazione e analisi BIA salvate!")
+                                except Exception as err:
+                                    st.error(f"Errore: {err}")
 
                 try:
-                    res_mis = supabase.table("misure_pazienti").select("*").eq("paziente_id", p_sel["id"]).order("data_rilevazione").execute()
-                    dati_misure = res_mis.data or []
-                except Exception: dati_misure = []
+                    dati_misure = fetch_all(supabase, "misure_pazienti", "*", order="data_rilevazione", filtri={"paziente_id": p_sel["id"]})
+                except Exception as err:
+                    dati_misure = []
+                    st.error(f"Impossibile leggere le misurazioni: {err}")
 
                 if dati_misure:
                     df_m = pd.DataFrame(dati_misure)
+                    df_m["data_rilevazione"] = pd.to_datetime(df_m["data_rilevazione"])
                     c_g1, c_g2 = st.columns(2)
                     with c_g1:
                         fig_p, ax_p = plt.subplots(figsize=(5, 2.3))
                         ax_p.plot(df_m["data_rilevazione"], df_m["peso_kg"], marker='o', color='#2563EB', linewidth=2, label="Peso (kg)")
                         ax_p.set_title("Andamento Peso (kg)", fontweight='bold')
                         ax_p.grid(True, linestyle='--', alpha=0.5)
-                        st.pyplot(fig_p)
+                        mostra_fig(fig_p)
                     
                     with c_g2:
                         fig_bia, ax_bia = plt.subplots(figsize=(5, 2.3))
@@ -650,58 +824,72 @@ elif st.session_state["ruolo"] == "admin":
                             ax_bia.set_title("Andamento Circonferenze (cm)", fontweight='bold')
                             ax_bia.legend()
                             ax_bia.grid(True, linestyle='--', alpha=0.5)
-                        st.pyplot(fig_bia)
+                        mostra_fig(fig_bia)
 
                     st.write("##### Dati Storici e Bioimpedenziometrici:")
                     col_view = ["data_rilevazione", "peso_kg", "circ_vita_cm", "circ_fianchi_cm"]
                     if "massa_grassa_kg" in df_m.columns:
                         col_view.extend(["massa_grassa_kg", "massa_grassa_perc", "massa_magra_kg", "massa_magra_perc", "acqua_totale_litri", "angolo_fase"])
                     col_view.append("note")
-                    st.dataframe(df_m[[c for c in col_view if c in df_m.columns]], use_container_width=True)
+                    vista_m = df_m[[c for c in col_view if c in df_m.columns]].copy()
+                    vista_m["data_rilevazione"] = vista_m["data_rilevazione"].dt.strftime("%d/%m/%Y")
+                    st.dataframe(vista_m, use_container_width=True)
                 else:
                     st.info("Nessuna misurazione presente.")
 
             with tab_esami:
                 st.markdown("#### 🧪 Registro Esami Ematochimici")
+                # unità di misura più comuni (l'intervallo di riferimento dipende dal laboratorio e dal sesso: va inserito dal referto)
+                UNITA_ESAMI = {
+                    "Glicemia a digiuno": "mg/dL", "Emoglobina Glicata (HbA1c)": "mmol/mol", "Colesterolo Totale": "mg/dL",
+                    "Colesterolo HDL": "mg/dL", "Colesterolo LDL": "mg/dL", "Trigliceridi": "mg/dL", "Vitamina D (25-OH)": "ng/mL",
+                    "Vitamina B12": "pg/mL", "Ferritina": "ng/mL", "Sideremia": "µg/dL", "Creatinina": "mg/dL",
+                    "Acido Urico": "mg/dL", "TSH": "µIU/mL", "ALT (GPT)": "U/L", "AST (GOT)": "U/L",
+                }
                 with st.expander("➕ Registra Parametro"):
+                    parametro = st.selectbox("Parametro Clinico:", list(UNITA_ESAMI.keys()), key=f"es_par_{p_sel['id']}")
                     with st.form("form_esame_add", clear_on_submit=True):
                         c_e1, c_e2, c_e3 = st.columns(3)
                         with c_e1:
-                            data_esame = st.date_input("Data Referto", value=date.today())
-                            parametro = st.selectbox("Parametro Clinico:", [
-                                "Glicemia a digiuno", "Emoglobina Glicata (HbA1c)", "Colesterolo Totale", 
-                                "Colesterolo HDL", "Colesterolo LDL", "Trigliceridi", "Vitamina D (25-OH)", 
-                                "Vitamina B12", "Ferritina", "Sideremia", "Creatinina", "Acido Urico", "TSH", "ALT (GPT)", "AST (GOT)"
-                            ])
+                            data_esame = st.date_input("Data Referto", value=oggi())
                         with c_e2:
-                            valore = st.number_input("Valore Riscontrato", min_value=0.0, value=90.0, step=1.0)
-                            unita = st.text_input("Unità di Misura", value="mg/dL")
+                            valore = st.number_input("Valore Riscontrato*", min_value=0.0, value=None, step=0.1)
+                            unita = st.text_input("Unità di Misura", value=UNITA_ESAMI[parametro], key=f"es_un_{parametro}")
                         with c_e3:
-                            val_min = st.number_input("Minimo Riferimento", min_value=0.0, value=70.0, step=1.0)
-                            val_max = st.number_input("Massimo Riferimento", min_value=0.0, value=100.0, step=1.0)
+                            val_min = st.number_input("Minimo Riferimento (dal referto)", min_value=0.0, value=None, step=0.1)
+                            val_max = st.number_input("Massimo Riferimento (dal referto)", min_value=0.0, value=None, step=0.1)
                         note_es = st.text_input("Note Referto")
                         if st.form_submit_button("Salva Esame", type="primary"):
-                            try:
-                                supabase.table("esami_laboratorio").insert({
-                                    "paziente_id": p_sel["id"], "data_esame": str(data_esame), "parametro": parametro,
-                                    "valore": valore, "unita_misura": unita, "valore_min": val_min, "valore_max": val_max, "note": note_es
-                                }).execute()
-                                st.success("Registrato!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Errore: {e}")
+                            if valore is None:
+                                st.error("Inserisci il valore riscontrato.")
+                            elif val_min is not None and val_max is not None and val_min > val_max:
+                                st.error("Il minimo di riferimento supera il massimo.")
+                            else:
+                                try:
+                                    supabase.table("esami_laboratorio").insert({
+                                        "paziente_id": p_sel["id"], "data_esame": str(data_esame), "parametro": parametro,
+                                        "valore": valore, "unita_misura": unita, "valore_min": val_min, "valore_max": val_max, "note": note_es
+                                    }).execute()
+                                    flash_rerun("Registrato!")
+                                except Exception as e:
+                                    st.error(f"Errore: {e}")
 
                 try:
-                    res_esami = supabase.table("esami_laboratorio").select("*").eq("paziente_id", p_sel["id"]).order("data_esame", desc=True).execute()
-                    dati_esami = res_esami.data or []
-                except Exception: dati_esami = []
+                    dati_esami = fetch_all(supabase, "esami_laboratorio", "*", order="data_esame", desc=True, filtri={"paziente_id": p_sel["id"]})
+                except Exception as err:
+                    dati_esami = []
+                    st.error(f"Impossibile leggere gli esami: {err}")
 
                 if dati_esami:
                     for es in dati_esami:
                         col_es1, col_es2, col_es3, col_es4 = st.columns([1.5, 2.5, 2.5, 1])
-                        v = float(es["valore"]); vmin = float(es.get("valore_min") or 0); vmax = float(es.get("valore_max") or 9999)
-                        stato_html = "<span class='traffic-green'>Normale</span>"
-                        if v < vmin or v > vmax: stato_html = f"<span class='traffic-red'>Fuori Range ({vmin}-{vmax})</span>"
+                        v = float(es["valore"]); vmin = es.get("valore_min"); vmax = es.get("valore_max")
+                        if vmin is None and vmax is None:
+                            stato_html = "<span>Range non indicato</span>"
+                        elif (vmin is not None and v < float(vmin)) or (vmax is not None and v > float(vmax)):
+                            stato_html = f"<span class='traffic-red'>Fuori Range ({esc(vmin if vmin is not None else '-')}-{esc(vmax if vmax is not None else '-')})</span>"
+                        else:
+                            stato_html = "<span class='traffic-green'>Normale</span>"
 
                         with col_es1: st.write(f"📅 **{es['data_esame']}**")
                         with col_es2: st.write(f"**{es['parametro']}**: `{v} {es['unita_misura']}`")
@@ -716,7 +904,7 @@ elif st.session_state["ruolo"] == "admin":
             with tab_msg:
                 st.markdown("#### 💬 Invio Rapido Promemoria Visita")
                 c_dt_v, c_hr_v = st.columns(2)
-                with c_dt_v: dt_prox = st.date_input("Data Appuntamento:", value=date.today() + timedelta(days=2))
+                with c_dt_v: dt_prox = st.date_input("Data Appuntamento:", value=oggi() + timedelta(days=2))
                 with c_hr_v: hr_prox = st.time_input("Orario Appuntamento:", value=datetime.strptime("10:30", "%H:%M").time())
 
                 testo_default_wa = (
@@ -743,7 +931,7 @@ elif st.session_state["ruolo"] == "admin":
 
             with tab_sintesi:
                 st.markdown("#### 📄 Foglio di Sintesi Clinica Visita (One-Page Summary)")
-                class PDFOnePageSummary(FPDF):
+                class PDFOnePageSummary(SafePDF):
                     def header(self):
                         self.set_font('Helvetica', 'B', 13)
                         self.cell(self.epw, 7, "STUDIO DI NUTRIZIONE CLINICA - SCHEDA SINTESI VISITA", align='C', new_x="LMARGIN", new_y="NEXT")
@@ -805,9 +993,15 @@ elif st.session_state["ruolo"] == "admin":
 
                     if res_es_paz:
                         for es in res_es_paz[:5]:
-                            v = float(es["valore"]); vmin = float(es.get("valore_min") or 0); vmax = float(es.get("valore_max") or 9999)
-                            flag = "[FUORI RANGE]" if (v < vmin or v > vmax) else "[OK]"
-                            pdf.cell(w_utile, 4.5, f"- {es['parametro']}: {v} {es['unita_misura']} (Rif: {vmin}-{vmax}) {flag} (del {es['data_esame']})", new_x="LMARGIN", new_y="NEXT")
+                            v = float(es["valore"]); vmin = es.get("valore_min"); vmax = es.get("valore_max")
+                            if vmin is None and vmax is None:
+                                flag = "[RANGE N/D]"
+                            elif (vmin is not None and v < float(vmin)) or (vmax is not None and v > float(vmax)):
+                                flag = "[FUORI RANGE]"
+                            else:
+                                flag = "[OK]"
+                            rif = f"{vmin if vmin is not None else '-'}-{vmax if vmax is not None else '-'}"
+                            pdf.multi_cell(w_utile, 4.5, f"- {es['parametro']}: {v} {es['unita_misura']} (Rif: {rif}) {flag} (del {es['data_esame']})", new_x="LMARGIN", new_y="NEXT")
                     else:
                         pdf.cell(w_utile, 4.5, "Nessun esame ematochimico refertato in cartella.", new_x="LMARGIN", new_y="NEXT")
                     pdf.ln(2)
@@ -835,7 +1029,7 @@ elif st.session_state["ruolo"] == "admin":
                 st.markdown("#### 📑 Modulo di Consenso Informato & Privacy GDPR con Firma Elettronica")
                 st.caption("Fai apporre la firma al paziente direttamente sul display tramite penna touch, dito o mouse.")
 
-                class PDFConsenso(FPDF):
+                class PDFConsenso(SafePDF):
                     def header(self):
                         self.set_font('Helvetica', 'B', 14)
                         self.cell(self.epw, 7, 'STUDIO DI NUTRIZIONE CLINICA', align='C', new_x="LMARGIN", new_y="NEXT")
@@ -871,18 +1065,16 @@ elif st.session_state["ruolo"] == "admin":
                     pdf.ln(8)
                     
                     pdf.set_font("Helvetica", "", 9)
-                    data_oggi = date.today().strftime('%d/%m/%Y')
+                    data_oggi = oggi().strftime('%d/%m/%Y')
                     pdf.cell(100, 6, f"Data: {data_oggi}", align='L')
                     pdf.cell(w_utile - 100, 6, "Firma del Paziente:", align='R', new_x="LMARGIN", new_y="NEXT")
                     pdf.ln(4)
 
                     if firma_img is not None:
-                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-                            firma_img.save(tmp_file.name)
-                            pdf.image(tmp_file.name, x=w_utile - 60, y=pdf.get_y(), w=55)
-                            tmp_path = tmp_file.name
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
+                        buf_firma = io.BytesIO()
+                        firma_img.save(buf_firma, format="PNG")
+                        buf_firma.seek(0)
+                        pdf.image(buf_firma, x=pdf.l_margin + w_utile - 60, y=pdf.get_y(), w=55)
                     else:
                         pdf.cell(100, 6, "")
                         pdf.cell(w_utile - 100, 6, "________________________________________", align='R')
@@ -891,7 +1083,10 @@ elif st.session_state["ruolo"] == "admin":
 
                 st.write("✍️ **Firma del Paziente nel riquadro sottostante:**")
                 
+                firma_pil = None
                 try:
+                    if st_canvas is None:
+                        raise RuntimeError("componente firma non disponibile")
                     canvas_result = st_canvas(
                         stroke_width=2,
                         stroke_color="#000000",
@@ -901,13 +1096,15 @@ elif st.session_state["ruolo"] == "admin":
                         drawing_mode="freedraw",
                         key=f"canvas_{p_sel['id']}"
                     )
-                    firma_pil = None
                     if canvas_result.image_data is not None:
-                        img_data = canvas_result.image_data
-                        if img_data.max() > 0:
-                            firma_pil = Image.fromarray(img_data.astype('uint8'))
-                except Exception as e_canvas:
-                    st.warning("Modalità firma alternativa attiva (Canvas non caricato)")
+                        img_data = canvas_result.image_data.astype("uint8")
+                        # c'e' una firma solo se esistono pixel scuri (tratto nero) sopra lo sfondo chiaro
+                        if (img_data[:, :, :3].astype(int).sum(axis=2) < 200).any():
+                            rgba = Image.fromarray(img_data).convert("RGBA")
+                            sfondo = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                            firma_pil = Image.alpha_composite(sfondo, rgba).convert("RGB")
+                except Exception:
+                    st.warning("Modalità firma alternativa attiva (Canvas non caricato): stampa il modulo e fai firmare a mano.")
                     firma_pil = None
 
                 col_btn_sign1, col_btn_sign2 = st.columns([1.5, 2])
@@ -930,8 +1127,7 @@ elif st.session_state["ruolo"] == "admin":
     # 2. PIANO SETTIMANALE E TEMPLATE CON GEMINI AI (MEDICO)
     # -------------------------------------------------------------------------------------------------
     elif scelta_menu == "🥗 Piano Settimanale & Template":
-        res_paz = supabase.table("pazienti").select("id, nome, cognome, codice_fiscale").order("cognome").execute()
-        pazienti = res_paz.data or []
+        pazienti = fetch_all(supabase, "pazienti", "id, nome, cognome, codice_fiscale", order="cognome")
         if not pazienti:
             st.warning("Nessun paziente presente.")
         else:
@@ -941,29 +1137,25 @@ elif st.session_state["ruolo"] == "admin":
                 sel_paz_str = st.selectbox("Cartella Paziente Attiva:", list(mappa_paz.keys()))
                 paziente = mappa_paz[sel_paz_str]
             
-            res_d = supabase.table("diete").select("*").eq("paziente_id", paziente["id"]).execute()
+            res_d = supabase.table("diete").select("*").eq("paziente_id", paziente["id"]).order("id").execute()
             dieta = res_d.data[0] if res_d.data else supabase.table("diete").insert({"paziente_id": paziente["id"], "titolo": f"Piano - {paziente['cognome']}"}).execute().data[0]
 
-            res_al = supabase.table("alimenti").select("*").order("nome").execute()
-            alimenti_list = res_al.data or []
-            dict_alimenti = {a["nome"].lower(): a for a in alimenti_list}
-            nomi_completi = [a["nome"] for a in alimenti_list]
+            alimenti_list = carica_alimenti()
+            # etichette univoche anche con nomi duplicati / diversi solo per maiuscole
+            etichette_alimenti, _visti = {}, set()
+            for a in alimenti_list:
+                lab = a["nome"]
+                if lab.lower() in _visti:
+                    lab = f"{a['nome']} [#{a['id']}]"
+                _visti.add(a["nome"].lower())
+                etichette_alimenti[lab] = a
+            nomi_completi = list(etichette_alimenti.keys())
+            catalogo_ids = {}
+            for a in alimenti_list:
+                catalogo_ids.setdefault(a["nome"].lower(), a["id"])
 
-            res_voci = supabase.table("voci_dieta").select(
-                "id, giorno_settimana, pasto, grammi, alimenti(nome, energia_kcal, proteine_g, lipidi_g, carboidrati_g, fibra_g)"
-            ).eq("dieta_id", dieta["id"]).execute()
-            
-            righe = []
-            for v in (res_voci.data or []):
-                al = v["alimenti"]
-                f = float(v["grammi"]) / 100.0
-                righe.append({
-                    "id": v["id"], "Giorno": v["giorno_settimana"], "Pasto": v["pasto"], "Alimento": al["nome"],
-                    "Grammi": v["grammi"], "Kcal": round(float(al["energia_kcal"]) * f, 1),
-                    "Proteine": round(float(al["proteine_g"]) * f, 1), "Carboidrati": round(float(al["carboidrati_g"]) * f, 1),
-                    "Grassi": round(float(al["lipidi_g"]) * f, 1)
-                })
-            df_dieta = pd.DataFrame(righe)
+            voci_dieta_db = fetch_all(supabase, "voci_dieta", SELECT_VOCI, filtri={"dieta_id": dieta["id"]})
+            df_dieta = pd.DataFrame(costruisci_righe_dieta(voci_dieta_db))
 
             col_tpl_carica, col_tpl_salva, col_tpl_gemini = st.columns([1.5, 1.5, 2])
             
@@ -980,15 +1172,22 @@ elif st.session_state["ruolo"] == "admin":
                         tpl_obj = tpl_map[scelto_tpl_str]
                         
                         if st.button("📥 Applica al Paziente", type="primary"):
-                            supabase.table("voci_dieta").delete().eq("dieta_id", dieta["id"]).execute()
-                            voci_tpl = supabase.table("template_voci_dieta").select("*").eq("template_id", tpl_obj["id"]).execute().data or []
-                            for vt in voci_tpl:
-                                supabase.table("voci_dieta").insert({
-                                    "dieta_id": dieta["id"], "giorno_settimana": vt["giorno_settimana"],
-                                    "pasto": vt["pasto"], "alimento_id": vt["alimento_id"], "grammi": vt["grammi"]
-                                }).execute()
-                            st.success("Template applicato!")
-                            st.rerun()
+                            voci_tpl = fetch_all(supabase, "template_voci_dieta", "*", filtri={"template_id": tpl_obj["id"]})
+                            if not voci_tpl:
+                                st.warning("Il template è vuoto: la dieta del paziente non è stata modificata.")
+                            else:
+                                try:
+                                    vecchi_id = [] if df_dieta.empty else [int(x) if str(x).isdigit() else x for x in df_dieta["id"].tolist()]
+                                    # prima si inseriscono le nuove voci (unica richiesta), poi si rimuovono le vecchie: nessuna perdita di dati in caso di errore
+                                    supabase.table("voci_dieta").insert([{
+                                        "dieta_id": dieta["id"], "giorno_settimana": vt["giorno_settimana"],
+                                        "pasto": vt["pasto"], "alimento_id": vt["alimento_id"], "grammi": vt["grammi"]
+                                    } for vt in voci_tpl]).execute()
+                                    if vecchi_id:
+                                        supabase.table("voci_dieta").delete().in_("id", vecchi_id).execute()
+                                    flash_rerun("Template applicato!")
+                                except Exception as err:
+                                    st.error(f"Errore applicazione template: {err}")
                     else:
                         st.info("Nessun template.")
 
@@ -1000,116 +1199,97 @@ elif st.session_state["ruolo"] == "admin":
                             nuovo_t = supabase.table("template_diete").insert({
                                 "nome": nome_nuovo_tpl.strip(), "descrizione": "Creato da gestionale", "target_kcal": float(dieta.get("target_kcal") or 2000.0)
                             }).execute().data[0]
-                            voci_da_salvare = supabase.table("voci_dieta").select("*").eq("dieta_id", dieta["id"]).execute().data or []
-                            for vs in voci_da_salvare:
-                                supabase.table("template_voci_dieta").insert({
-                                    "template_id": nuovo_t["id"], "giorno_settimana": vs["giorno_settimana"],
-                                    "pasto": vs["pasto"], "alimento_id": vs["alimento_id"], "grammi": vs["grammi"]
-                                }).execute()
-                            st.success("Template salvato!")
-                            st.rerun()
+                            voci_da_salvare = fetch_all(supabase, "voci_dieta", "*", filtri={"dieta_id": dieta["id"]})
+                            supabase.table("template_voci_dieta").insert([{
+                                "template_id": nuovo_t["id"], "giorno_settimana": vs["giorno_settimana"],
+                                "pasto": vs["pasto"], "alimento_id": vs["alimento_id"], "grammi": vs["grammi"]
+                            } for vs in voci_da_salvare]).execute()
+                            flash_rerun("Template salvato!")
                         else:
                             st.warning("Inserisci nome e alimenti.")
 
             with col_tpl_gemini:
                 with st.expander("✨ Genera Template con AI (Gemini)"):
+                    st.caption("⚠️ Il testo del file viene inviato a Google (Gemini): carica solo piani anonimi, senza nome o dati identificativi del paziente.")
                     uploaded_file = st.file_uploader("Carica file piano alimentare (PDF o TXT):", type=["pdf", "txt"])
                     nome_gen_tpl = st.text_input("Nome per il nuovo Template AI:", placeholder="Es: Dieta da File")
                     
                     if st.button("🤖 Estrai e Crea Template con AI", type="primary"):
-                        if uploaded_file and nome_gen_tpl.strip():
+                        if not GEMINI_API_KEY:
+                            st.error("Chiave Gemini non configurata (secret gemini.api_key).")
+                        elif not (uploaded_file and nome_gen_tpl.strip()):
+                            st.warning("Carica un file e inserisci un nome per il template.")
+                        else:
                             with st.spinner("Gemini sta analizzando il file..."):
                                 try:
                                     testo_file = ""
-                                    if uploaded_file.name.endswith('.txt'):
+                                    nome_file = uploaded_file.name.lower()
+                                    if nome_file.endswith('.txt'):
                                         testo_file = uploaded_file.read().decode("utf-8", errors="ignore")
-                                    elif uploaded_file.name.endswith('.pdf'):
+                                    else:
                                         reader = pypdf.PdfReader(uploaded_file)
                                         for page in reader.pages:
-                                            testo_file += page.extract_text() or ""
-                                    else:
-                                        testo_file = str(uploaded_file.read())
+                                            testo_file += (page.extract_text() or "") + "\n"
 
                                     if not testo_file.strip():
                                         st.error("Il file risulta vuoto o non leggibile.")
                                     else:
-                                        # Modello Gemini aggiornato supportato
-                                        model = genai.GenerativeModel('gemini-3.6-flash')
                                         prompt_ia = (
                                             "Analizza il seguente testo estratto da un piano alimentare. "
                                             "Estrai i giorni della settimana (Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica), "
                                             "i pasti (Colazione, Spuntino Mattina, Pranzo, Merenda Pomeriggio, Cena) e gli alimenti con le rispettive grammature. "
                                             "IMPORTANTE: se i grammi non sono specificati, assegna 100 come numero. "
-                                            "Restituisci ESCLUSIVAMENTE un oggetto JSON valido con questa struttura esatta:\n"
+                                            "Restituisci ESCLUSIVAMENTE un array JSON con questa struttura esatta:\n"
                                             "[\n  {\"giorno\": \"Lunedì\", \"pasto\": \"Pranzo\", \"alimento\": \"Nome Alimento\", \"grammi\": 100},\n...\n]\n\n"
                                             f"TESTO DEL PIANO:\n{testo_file[:15000]}"
                                         )
-                                        
-                                        response = model.generate_content(prompt_ia)
-                                        raw_text = response.text.strip()
-                                        
-                                        if "```json" in raw_text:
-                                            raw_text = raw_text.split("```json")[1].split("```")[0].strip()
-                                        elif "```" in raw_text:
-                                            raw_text = raw_text.split("```")[1].split("```")[0].strip()
-                                        
-                                        dati_estratti = json.loads(raw_text)
-                                        
-                                        if dati_estratti:
-                                            nuovo_t_ai = supabase.table("template_diete").insert({
-                                                "nome": nome_gen_tpl.strip(), "descrizione": "Generato automaticamente con Gemini AI", "target_kcal": 2000.0
-                                            }).execute().data[0]
-                                            
-                                            res_al_all = supabase.table("alimenti").select("id, nome").execute().data or []
-                                            al_dict = {a["nome"].lower(): a["id"] for a in res_al_all}
-                                            
-                                            inseriti = 0
-                                            for item in dati_estratti:
-                                                alim_nome = item.get("alimento", "").strip().lower()
-                                                
-                                                # Parsing sicuro dei grammi per evitare float(None)
-                                                g_val = item.get("grammi")
-                                                try:
-                                                    if g_val is None:
-                                                        grammi = 100.0
-                                                    elif isinstance(g_val, (int, float)):
-                                                        grammi = float(g_val)
-                                                    else:
-                                                        numeri = re.findall(r"[-+]?\d*\.\d+|\d+", str(g_val))
-                                                        grammi = float(numeri[0]) if numeri else 100.0
-                                                except Exception:
-                                                    grammi = 100.0
+                                        client_ai = genai.Client(api_key=GEMINI_API_KEY)
+                                        response = client_ai.models.generate_content(
+                                            model=GEMINI_MODEL, contents=prompt_ia,
+                                            config={"response_mime_type": "application/json"},
+                                        )
+                                        dati_estratti = json.loads((response.text or "").strip())
+                                        if not isinstance(dati_estratti, list):
+                                            raise ValueError("risposta AI non è una lista")
 
-                                                giorno = item.get("giorno", "Lunedì")
-                                                pasto = item.get("pasto", "Pranzo")
-                                                
-                                                match_id = None
-                                                for k, aid in al_dict.items():
-                                                    if alim_nome in k or k in alim_nome:
-                                                        match_id = aid
-                                                        break
-                                                
-                                                if not match_id and res_al_all:
-                                                    match_id = res_al_all[0]["id"]
-                                                    
-                                                if match_id:
-                                                    supabase.table("template_voci_dieta").insert({
-                                                        "template_id": nuovo_t_ai["id"],
-                                                        "giorno_settimana": giorno,
-                                                        "pasto": pasto,
-                                                        "alimento_id": match_id,
-                                                        "grammi": grammi
-                                                    }).execute()
-                                                    inseriti += 1
-                                                    
-                                            st.success(f"Template '{nome_gen_tpl}' creato con successo ({inseriti} voci importate)!")
-                                            st.rerun()
+                                        mappa_giorni = {g.lower(): g for g in GIORNI}
+                                        mappa_pasti = {p.lower(): p for p in PASTI}
+                                        voci_ok, non_trovati, scartate = [], [], 0
+                                        for item in dati_estratti:
+                                            if not isinstance(item, dict):
+                                                scartate += 1
+                                                continue
+                                            giorno = mappa_giorni.get(str(item.get("giorno", "")).strip().lower())
+                                            pasto = mappa_pasti.get(str(item.get("pasto", "")).strip().lower())
+                                            nome_al = str(item.get("alimento") or "").strip()
+                                            if not (giorno and pasto and nome_al):
+                                                scartate += 1
+                                                continue
+                                            al_id = trova_alimento(nome_al, catalogo_ids)
+                                            if al_id is None:
+                                                non_trovati.append(nome_al)
+                                                continue
+                                            voci_ok.append({"giorno_settimana": giorno, "pasto": pasto, "alimento_id": al_id,
+                                                            "grammi": parse_grammi(item.get("grammi"))})
+
+                                        if not voci_ok:
+                                            st.error("Nessuna voce importabile: gli alimenti non corrispondono al catalogo. Template non creato.")
                                         else:
-                                            st.error("Gemini non ha restituito dati validi.")
+                                            nuovo_t_ai = supabase.table("template_diete").insert({
+                                                "nome": nome_gen_tpl.strip(), "descrizione": "Generato con Gemini AI (da rivedere)", "target_kcal": 2000.0
+                                            }).execute().data[0]
+                                            supabase.table("template_voci_dieta").insert(
+                                                [{**v, "template_id": nuovo_t_ai["id"]} for v in voci_ok]
+                                            ).execute()
+                                            msg = f"Template '{nome_gen_tpl}' creato ({len(voci_ok)} voci importate)."
+                                            if non_trovati:
+                                                msg += f" Alimenti NON presenti nel catalogo e quindi omessi: {', '.join(sorted(set(non_trovati)))}."
+                                            if scartate:
+                                                msg += f" Voci scartate perché incomplete: {scartate}."
+                                            msg += " Controlla sempre il risultato prima di applicarlo a un paziente."
+                                            flash_rerun(msg)
                                 except Exception as e_ai:
                                     st.error(f"Errore durante l'elaborazione con Gemini: {e_ai}")
-                        else:
-                            st.warning("Carica un file e inserisci un nome per il template.")
 
             with col_btn_pdf:
                 st.write("")
@@ -1157,7 +1337,7 @@ elif st.session_state["ruolo"] == "admin":
                         ax1.pie(vals, labels=['Carboidrati', 'Proteine', 'Grassi'], autopct='%1.1f%%', startangle=90, colors=['#3B82F6', '#10B981', '#F59E0B'])
                         ax1.axis('equal')
                         st.write("**Ripartizione Macro (%)**")
-                        st.pyplot(fig1)
+                        mostra_fig(fig1)
                 with col_g2:
                     fig2, ax2 = plt.subplots(figsize=(4.5, 2.0))
                     k_giorni = [df_dieta[df_dieta["Giorno"] == g]["Kcal"].sum() for g in giorni_settimana]
@@ -1166,7 +1346,7 @@ elif st.session_state["ruolo"] == "admin":
                     ax2.set_ylabel("Kcal")
                     ax2.legend()
                     st.write("**Kcal per Giorno vs Target**")
-                    st.pyplot(fig2)
+                    mostra_fig(fig2)
             else:
                 st.info("Nessun alimento inserito.")
 
@@ -1194,7 +1374,7 @@ elif st.session_state["ruolo"] == "admin":
                             st.markdown(f"**Totale {g}:** `{df_g['Kcal'].sum():.0f} Kcal` | 🥩 P: `{df_g['Proteine'].sum():.1f}g` | 🍚 C: `{df_g['Carboidrati'].sum():.1f}g` | 🥑 G: `{df_g['Grassi'].sum():.1f}g`")
                         st.markdown("---")
 
-                        for p_nome in ["Colazione", "Spuntino Mattina", "Pranzo", "Merenda Pomeriggio", "Cena"]:
+                        for p_nome in PASTI:
                             st.markdown(f"<div class='meal-card'><strong>🍽️ {p_nome.upper()}</strong></div>", unsafe_allow_html=True)
                             if not df_g.empty:
                                 sub_pasto = df_g[df_g["Pasto"] == p_nome]
@@ -1206,16 +1386,23 @@ elif st.session_state["ruolo"] == "admin":
                                         if st.button("❌", key=f"del_{row['id']}_{g}_{p_nome}", help="Elimina"):
                                             supabase.table("voci_dieta").delete().eq("id", row["id"]).execute()
                                             st.rerun()
-                            
-                            with st.form(f"form_add_{g}_{p_nome}", clear_on_submit=True):
-                                c_in_al, c_in_gr, c_btn = st.columns([3.5, 1.2, 1.2])
-                                with c_in_al: scelta_al = st.selectbox("Alimento:", nomi_completi, key=f"sel_{g}_{p_nome}", label_visibility="collapsed")
-                                with c_in_gr: quantita = st.number_input("Grammi", min_value=5.0, value=100.0, step=10.0, key=f"gr_{g}_{p_nome}", label_visibility="collapsed")
-                                with c_btn: invia = st.form_submit_button("➕ Inserisci", use_container_width=True, type="primary")
+
+                        if not nomi_completi:
+                            st.warning("Il catalogo alimenti è vuoto: aggiungi prima degli alimenti.")
+                        else:
+                            with st.form(f"form_add_{g}", clear_on_submit=True):
+                                st.write(f"➕ **Aggiungi alimento a {g}**")
+                                c_in_p, c_in_al, c_in_gr, c_btn = st.columns([2, 3.5, 1.2, 1.2])
+                                with c_in_p: pasto_sel = st.selectbox("Pasto", PASTI, key=f"pasto_{g}")
+                                with c_in_al: scelta_al = st.selectbox("Alimento", nomi_completi, key=f"sel_{g}")
+                                with c_in_gr: quantita = st.number_input("Grammi", min_value=5.0, value=100.0, step=10.0, key=f"gr_{g}")
+                                with c_btn:
+                                    st.write("")
+                                    invia = st.form_submit_button("➕ Inserisci", use_container_width=True, type="primary")
                                 if invia and scelta_al:
-                                    al_obj = dict_alimenti[scelta_al.lower()]
+                                    al_obj = etichette_alimenti[scelta_al]
                                     supabase.table("voci_dieta").insert({
-                                        "dieta_id": dieta["id"], "giorno_settimana": g, "pasto": p_nome,
+                                        "dieta_id": dieta["id"], "giorno_settimana": g, "pasto": pasto_sel,
                                         "alimento_id": al_obj["id"], "grammi": quantita
                                     }).execute()
                                     st.rerun()
@@ -1225,7 +1412,7 @@ elif st.session_state["ruolo"] == "admin":
     # -------------------------------------------------------------------------------------------------
     elif scelta_menu == "🍎 Catalogo Alimenti & Cibi":
         st.subheader("🍎 Database Alimenti & Valori Nutrizionali dello Studio")
-        st.caption("Aggiungi o consulta alimenti e prodotti commerciali (valori per 100g di parte edibile)[cite: 1].")
+        st.caption("Aggiungi o consulta alimenti e prodotti commerciali (valori per 100g di parte edibile).")
 
         tab_elenco_cibi, tab_nuovo_cibo = st.tabs(["📋 Tabella Alimenti dello Studio", "➕ Inserisci Nuovo Alimento / Prodotto"])
 
@@ -1251,8 +1438,8 @@ elif st.session_state["ruolo"] == "admin":
                                 "nome": nome_cibo.strip(), "energia_kcal": kcal_100g, "proteine_g": prot_100g,
                                 "carboidrati_g": carb_100g, "lipidi_g": grassi_100g, "fibra_g": fibra_100g, "categoria": categoria_cibo
                             }).execute()
-                            st.success(f"Alimento '{nome_cibo}' inserito con successo!")
-                            st.rerun()
+                            carica_alimenti.clear()
+                            flash_rerun(f"Alimento '{nome_cibo}' inserito con successo!")
                         except Exception as e_cibo:
                             st.error(f"Errore inserimento: {e_cibo}")
                     else:
@@ -1260,9 +1447,10 @@ elif st.session_state["ruolo"] == "admin":
 
         with tab_elenco_cibi:
             try:
-                res_all_alim = supabase.table("alimenti").select("*").order("nome").execute()
-                lista_all_alim = res_all_alim.data or []
-            except Exception: lista_all_alim = []
+                lista_all_alim = carica_alimenti()
+            except Exception as err:
+                lista_all_alim = []
+                st.error(f"Impossibile leggere il catalogo: {err}")
 
             if lista_all_alim:
                 c_cerca_cibo, c_conteggio = st.columns([3, 1])
@@ -1270,21 +1458,30 @@ elif st.session_state["ruolo"] == "admin":
                 with c_conteggio: st.write(""); st.write(f"Totale alimenti: **{len(lista_all_alim)}**")
 
                 filtrati_cibi = [a for a in lista_all_alim if filtro_cibo in a["nome"].lower()]
-                df_cibi = pd.DataFrame(filtrati_cibi)
-                st.dataframe(df_cibi[["nome", "energia_kcal", "proteine_g", "carboidrati_g", "lipidi_g", "fibra_g", "categoria"]], use_container_width=True)
+                if filtrati_cibi:
+                    df_cibi = pd.DataFrame(filtrati_cibi)
+                    st.dataframe(df_cibi[["nome", "energia_kcal", "proteine_g", "carboidrati_g", "lipidi_g", "fibra_g", "categoria"]], use_container_width=True)
+                else:
+                    st.info("Nessun alimento corrisponde alla ricerca.")
 
                 with st.expander("🗑️ Eliminazione Alimento"):
                     c_del_sel, c_del_act = st.columns([3, 1])
                     with c_del_sel:
-                        map_del_cibo = {f"{a['nome']} ({a['energia_kcal']} kcal)": a["id"] for a in filtrati_cibi}
+                        map_del_cibo = {f"{a['nome']} ({a['energia_kcal']} kcal) [#{a['id']}]": a["id"] for a in filtrati_cibi}
                         if map_del_cibo: cibo_da_eliminare = st.selectbox("Seleziona alimento:", list(map_del_cibo.keys()))
                     with c_del_act:
                         st.write("")
                         if map_del_cibo and st.button("Elimina Alimento", type="secondary"):
+                            id_del = map_del_cibo[cibo_da_eliminare]
                             try:
-                                supabase.table("alimenti").delete().eq("id", map_del_cibo[cibo_da_eliminare]).execute()
-                                st.success("Alimento rimosso!")
-                                st.rerun()
+                                in_diete = supabase.table("voci_dieta").select("id", count="exact").eq("alimento_id", id_del).limit(1).execute().count or 0
+                                in_tpl = supabase.table("template_voci_dieta").select("id", count="exact").eq("alimento_id", id_del).limit(1).execute().count or 0
+                                if in_diete or in_tpl:
+                                    st.error(f"L'alimento è usato in {in_diete} voci di dieta e {in_tpl} voci di template: rimuovilo prima da lì per non alterare le diete esistenti.")
+                                else:
+                                    supabase.table("alimenti").delete().eq("id", id_del).execute()
+                                    carica_alimenti.clear()
+                                    flash_rerun("Alimento rimosso!")
                             except Exception as e_del:
                                 st.error(f"Impossibile eliminare: {e_del}")
             else:
@@ -1298,15 +1495,15 @@ elif st.session_state["ruolo"] == "admin":
         st.caption("Panoramica globale dell'andamento dei pazienti, efficacia dei trattamenti e distribuzione degli obiettivi nutrizionali.")
 
         try:
-            pazienti_all = supabase.table("pazienti").select("*").execute().data or []
-            misure_all = supabase.table("misure_pazienti").select("*").order("data_rilevazione").execute().data or []
-            visite_all = supabase.table("scadenze").select("*").execute().data or []
+            pazienti_all = fetch_all(supabase, "pazienti", "*")
+            misure_all = fetch_all(supabase, "misure_pazienti", "*", order="data_rilevazione")
+            visite_all = fetch_all(supabase, "scadenze", "*")
         except Exception:
             pazienti_all, misure_all, visite_all = [], [], []
 
         if pazienti_all:
             tot_pazienti = len(pazienti_all)
-            tot_visite = len(visite_all)
+            tot_visite = sum(1 for v in visite_all if v.get("categoria") in ("CONTROLLO_PAZIENTE", "PRIMA_VISITA"))
 
             df_mis = pd.DataFrame(misure_all) if misure_all else pd.DataFrame()
             tot_kg_persi = 0.0
@@ -1354,7 +1551,7 @@ elif st.session_state["ruolo"] == "admin":
                     fig_ob, ax_ob = plt.subplots(figsize=(4.5, 2.3))
                     ax_ob.pie(ob_counts.values, labels=ob_counts.index, autopct='%1.1f%%', startangle=90, colors=['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6'])
                     ax_ob.axis('equal')
-                    st.pyplot(fig_ob)
+                    mostra_fig(fig_ob)
 
             with c_graf2:
                 st.markdown("##### 📈 Tipologia di Visite Pianificate")
@@ -1365,7 +1562,7 @@ elif st.session_state["ruolo"] == "admin":
                     ax_vis.bar([str(x)[:12] for x in vis_counts.index], vis_counts.values, color="#6366F1")
                     ax_vis.set_ylabel("Numero Visite")
                     plt.xticks(rotation=15)
-                    st.pyplot(fig_vis)
+                    mostra_fig(fig_vis)
 
             st.markdown("---")
             st.markdown("##### 📋 Monitoraggio Aderenza e Progressi Pazienti")
@@ -1382,61 +1579,74 @@ elif st.session_state["ruolo"] == "admin":
     # -------------------------------------------------------------------------------------------------
     elif scelta_menu == "📅 Calendario & Visite":
         st.subheader("🗓️ Agenda Appuntamenti & Calendario Studio")
-        st.caption("Sincronizzato in tempo reale con rodolfocasa22@gmail.com con avvisi a -30, -10 e -5 giorni.")
+        st.caption("Sincronizzato con Google Calendar con avvisi a -28, -10 e -5 giorni (Google consente al massimo 4 settimane di anticipo).")
         
-        res_scad = supabase.table("scadenze").select("id, titolo, data_scadenza, categoria, google_event_id, pazienti(nome, cognome, telefono)").order("data_scadenza").execute()
-        eventi_db = res_scad.data or []
+        eventi_db = fetch_all(supabase, "scadenze", "id, titolo, data_scadenza, categoria, google_event_id, pazienti(nome, cognome, telefono)", order="data_scadenza")
 
         c_ins, c_cal_view = st.columns([1.1, 2.5])
         with c_ins:
             st.markdown("#### ➕ Pianifica Visita o Scadenza")
-            res_p = supabase.table("pazienti").select("id, nome, cognome").order("cognome").execute()
-            paz_map = {f"{p['cognome']} {p['nome']}": p['id'] for p in (res_p.data or [])}
+            res_p = fetch_all(supabase, "pazienti", "id, nome, cognome, codice_fiscale", order="cognome")
+            paz_map = {f"{p['cognome']} {p['nome']} (CF: {p.get('codice_fiscale') or 'N/D'})": p['id'] for p in res_p}
             
-            with st.form("form_ev_cal_modern", clear_on_submit=True):
+            with st.form("form_ev_cal_modern", clear_on_submit=False):
                 paz_c = st.selectbox("Paziente collegato:", ["-- Scadenza Generale Studio --"] + list(paz_map.keys()))
                 tit = st.text_input("Oggetto / Tipo Visita", placeholder="Es: Prima Visita, Controllo Mensile...")
                 col_d, col_o = st.columns(2)
-                with col_d: d_ev = st.date_input("Data Visita", value=date.today())
+                with col_d: d_ev = st.date_input("Data Visita", value=oggi())
                 with col_o: ora_ev = st.time_input("Orario", value=datetime.strptime("10:00", "%H:%M").time())
                 cat = st.selectbox("Categoria", ["CONTROLLO_PAZIENTE", "PRIMA_VISITA", "SISTEMA_TS", "ENPAB", "ALTRO"])
-                sync_g = st.checkbox("Sincronizza su Google Calendar (avvisi -30, -10, -5 gg)", value=True)
+                sync_g = st.checkbox("Sincronizza su Google Calendar (avvisi -28, -10, -5 gg)", value=True)
                 
-                if st.form_submit_button("Inserisci in Calendario", type="primary", use_container_width=True) and tit:
-                    p_id = paz_map[paz_c] if paz_c != "-- Scadenza Generale Studio --" else None
-                    nome_paz_str = f" - {paz_c}" if p_id else ""
-                    data_str = str(d_ev)
-                    g_event_id = None
-                    
-                    if sync_g:
-                        g_event_id, _ = crea_evento_calendar(f"[{cat}] {tit}{nome_paz_str}", data_str, f"Orario: {ora_ev}")
-                    
-                    supabase.table("scadenze").insert({
-                        "titolo": f"{tit}{nome_paz_str}", "data_scadenza": data_str, "categoria": cat, "paziente_id": p_id, "google_event_id": g_event_id
-                    }).execute()
-                    st.success("Registrato!")
-                    st.rerun()
+                if st.form_submit_button("Inserisci in Calendario", type="primary", use_container_width=True):
+                    if not tit.strip():
+                        st.error("Inserisci l'oggetto della visita.")
+                    else:
+                        p_id = paz_map[paz_c] if paz_c != "-- Scadenza Generale Studio --" else None
+                        nome_paz_str = f" - {paz_c.split(' (CF:')[0]}" if p_id else ""
+                        data_str = str(d_ev)
+                        g_event_id, esito_g = None, None
+                        
+                        if sync_g:
+                            g_event_id, esito_g = crea_evento_calendar(f"[{cat}] {tit.strip()}{nome_paz_str}", data_str, f"Orario: {ora_ev.strftime('%H:%M')}")
+                        
+                        try:
+                            supabase.table("scadenze").insert({
+                                "titolo": f"{tit.strip()}{nome_paz_str} ({ora_ev.strftime('%H:%M')})", "data_scadenza": data_str, "categoria": cat,
+                                "paziente_id": p_id, "google_event_id": g_event_id
+                            }).execute()
+                            if sync_g and not g_event_id:
+                                st.session_state["_flash"] = f"Visita registrata in agenda, ma NON sincronizzata su Google: {esito_g}"
+                            else:
+                                st.session_state["_flash"] = "Registrato!"
+                            st.rerun()
+                        except Exception as err:
+                            if g_event_id:
+                                elimina_evento_calendar(g_event_id)  # evita eventi orfani su Google
+                            st.error(f"Errore salvataggio: {err}")
 
             st.markdown("---")
             st.markdown("#### 🗑️ Gestione / Cancella Appuntamenti")
             if eventi_db:
-                opzioni_canc_cal = {f"{ev['data_scadenza']} | {ev['titolo']}": ev for ev in eventi_db}
+                opzioni_canc_cal = {f"{ev['data_scadenza']} | {ev['titolo']} [#{ev['id']}]": ev for ev in eventi_db}
                 sel_canc = st.selectbox("Seleziona evento da gestire:", list(opzioni_canc_cal.keys()))
                 ev_da_eliminare = opzioni_canc_cal[sel_canc]
                 
                 c_btn_del, c_btn_wa_cal = st.columns(2)
                 with c_btn_del:
                     if st.button("🗑️ Elimina", use_container_width=True):
+                        avviso = ""
                         if ev_da_eliminare.get("google_event_id"):
-                            elimina_evento_calendar(ev_da_eliminare["google_event_id"])
+                            ok_g, esito_g = elimina_evento_calendar(ev_da_eliminare["google_event_id"])
+                            if not ok_g:
+                                avviso = f" Attenzione: l'evento su Google Calendar non è stato rimosso ({esito_g})."
                         supabase.table("scadenze").delete().eq("id", ev_da_eliminare["id"]).execute()
-                        st.success("Evento rimosso!")
-                        st.rerun()
+                        flash_rerun("Evento rimosso!" + avviso)
                 
                 with c_btn_wa_cal:
                     pz_info = ev_da_eliminare.get("pazienti")
-                    if pz_info and pz_info.get("telefono"):
-                        tel_w = str(pz_info['telefono']).replace(" ", "").replace("+", "")
+                    tel_w = normalizza_telefono(pz_info.get("telefono")) if pz_info else ""
+                    if tel_w:
                         txt_w = f"Gentile {pz_info['nome']}, le ricordo l'appuntamento per {ev_da_eliminare['titolo']} fissato per il {ev_da_eliminare['data_scadenza']}. Dott. Rodolfo Casa"
                         st.link_button("📲 WhatsApp", f"https://wa.me/{tel_w}?text={urllib.parse.quote(txt_w)}", use_container_width=True)
             else:
@@ -1451,8 +1661,8 @@ elif st.session_state["ruolo"] == "admin":
                 nome_paz = f" ({pz['cognome']} {pz['nome']})" if pz else ""
                 eventi_fc.append({"title": f"{x['titolo']}{nome_paz}", "start": x["data_scadenza"], "color": colore, "allDay": True})
             
-            eventi_json = json.dumps(eventi_fc)
-            data_iniziale = date.today().strftime("%Y-%m-%d")
+            eventi_json = json_per_script(eventi_fc)
+            data_iniziale = oggi().strftime("%Y-%m-%d")
 
             html_calendar = f"""
             <!DOCTYPE html>
@@ -1494,12 +1704,19 @@ elif st.session_state["ruolo"] == "admin":
     # -------------------------------------------------------------------------------------------------
     elif scelta_menu == "💶 Resoconto & Fatturazione Sanitaria":
         st.subheader("Bilancio Studio & Gestione Fatture Sanitarie")
+        if not (STUDIO["piva"] or STUDIO["cf"]):
+            st.warning("Dati fiscali dello studio mancanti: compila la sezione [studio] nei secrets (partita_iva/codice_fiscale, indirizzo, iscrizione_albo) o la fattura PDF sarà incompleta.")
         tab_registro, tab_fattura, tab_sts = st.tabs(["📊 Registro Movimenti & Bilancio", "🧾 Emetti Fattura Sanitaria PDF", "🏛️ Export Tracciato Sistema TS"])
+
+        try:
+            movs = fetch_all(supabase, "movimenti_fiscali", "*", order="data", desc=True)
+        except Exception as err:
+            movs = []
+            st.error(f"Impossibile leggere i movimenti: {err}")
+        pazienti_list = fetch_all(supabase, "pazienti", "*", order="cognome")
 
         with tab_fattura:
             st.markdown("#### 🧾 Generatore Fattura Sanitaria Professionale")
-            res_p = supabase.table("pazienti").select("*").order("cognome").execute()
-            pazienti_list = res_p.data or []
             
             if not pazienti_list:
                 st.warning("Inserisci prima un paziente.")
@@ -1507,33 +1724,43 @@ elif st.session_state["ruolo"] == "admin":
                 mappa_fat = {f"{p['cognome']} {p['nome']} (CF: {p.get('codice_fiscale') or 'N/D'})": p for p in pazienti_list}
                 paz_fat_str = st.selectbox("Intesta Fattura a:", list(mappa_fat.keys()))
                 paz_fat = mappa_fat[paz_fat_str]
+                if not cf_valido(paz_fat.get("codice_fiscale")):
+                    st.warning("Il paziente non ha un Codice Fiscale valido: la spesa non potrà essere trasmessa correttamente al Sistema TS.")
 
+                num_default = prossimo_numero_fattura([m.get("descrizione") for m in movs], oggi().year)
                 c_f1, c_f2, c_f3 = st.columns(3)
-                with c_f1: num_fat = st.text_input("Numero Fattura", value=f"FAT-{date.today().year}-001")
-                with c_f2: data_fat = st.date_input("Data Emissione", value=date.today())
+                with c_f1: num_fat = st.text_input("Numero Fattura (progressivo)", value=num_default, key=f"numfat_{num_default}")
+                with c_f2: data_fat = st.date_input("Data Emissione", value=oggi())
                 with c_f3: metodo_pag = st.selectbox("Metodo Pagamento", ["Bonifico Bancario", "POS / Carta di Debito", "Contanti"])
 
                 desc_prestazione = st.text_input("Descrizione Prestazione Sanitaria", value="Consulenza e valutazione nutrizionale con piano alimentare personalizzato")
                 onorario_base = st.number_input("Onorario Base Prestazione (€)", min_value=10.0, value=100.0, step=5.0)
 
-                rivalsa_enpab = onorario_base * 0.04
-                imponibile_totale = onorario_base + rivalsa_enpab
-                marca_da_bollo = 2.00 if imponibile_totale > 77.47 else 0.00
-                totale_da_pagare = imponibile_totale + marca_da_bollo
+                calc = calcola_fattura(onorario_base)
+                rivalsa_enpab, marca_da_bollo, totale_da_pagare = calc["rivalsa"], calc["bollo"], calc["totale"]
+                gia_registrata = any(f"Fattura {num_fat} " in (m.get("descrizione") or "") for m in movs)
+                if gia_registrata:
+                    st.error(f"La fattura {num_fat} risulta già registrata: usa un numero diverso.")
 
                 st.markdown("---")
                 m_f1, m_f2, m_f3, m_f4 = st.columns(4)
-                m_f1.metric("Onorario Base", f"€ {onorario_base:.2f}")
+                m_f1.metric("Onorario Base", f"€ {calc['onorario']:.2f}")
                 m_f2.metric("ENPAB (4%)", f"€ {rivalsa_enpab:.2f}")
                 m_f3.metric("Marca da Bollo", f"€ {marca_da_bollo:.2f}")
                 m_f4.metric("Totale Fattura", f"€ {totale_da_pagare:.2f}")
 
-                class PDFFattura(FPDF):
+                class PDFFattura(SafePDF):
                     def header(self):
                         self.set_font('Helvetica', 'B', 14)
-                        self.cell(self.epw, 6, "STUDIO DI NUTRIZIONE CLINICA", align='L', new_x="LMARGIN", new_y="NEXT")
+                        self.cell(self.epw, 6, STUDIO["nome"], align='L', new_x="LMARGIN", new_y="NEXT")
                         self.set_font('Helvetica', '', 8.5)
-                        self.cell(self.epw, 4, "Biologo Nutrizionista | Ricevuta Sanitaria Tracciabile", align='L', new_x="LMARGIN", new_y="NEXT")
+                        riga1 = " | ".join(x for x in [STUDIO["titolare"], "Biologo Nutrizionista", STUDIO["albo"]] if x)
+                        self.cell(self.epw, 4, riga1, align='L', new_x="LMARGIN", new_y="NEXT")
+                        riga2 = " | ".join(x for x in [STUDIO["indirizzo"],
+                                                       f"P.IVA {STUDIO['piva']}" if STUDIO["piva"] else "",
+                                                       f"C.F. {STUDIO['cf']}" if STUDIO["cf"] else ""] if x)
+                        if riga2:
+                            self.cell(self.epw, 4, riga2, align='L', new_x="LMARGIN", new_y="NEXT")
                         self.ln(6)
                     def footer(self):
                         self.set_y(-12)
@@ -1562,15 +1789,15 @@ elif st.session_state["ruolo"] == "admin":
 
                     pdf.set_font("Helvetica", "", 9)
                     pdf.cell(w_utile * 0.75, 6, f"  {desc_prestazione}", border=1)
-                    pdf.cell(w_utile * 0.25, 6, f"E {onorario_base:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
+                    pdf.cell(w_utile * 0.25, 6, f"EUR {calc['onorario']:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
                     pdf.cell(w_utile * 0.75, 6, "  Contributo Integrativo ENPAB (4%)", border=1)
-                    pdf.cell(w_utile * 0.25, 6, f"E {rivalsa_enpab:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
+                    pdf.cell(w_utile * 0.25, 6, f"EUR {rivalsa_enpab:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
                     if marca_da_bollo > 0:
                         pdf.cell(w_utile * 0.75, 6, "  Imposta di bollo assolta sull'originale (D.M. 17/06/2014)", border=1)
-                        pdf.cell(w_utile * 0.25, 6, f"E {marca_da_bollo:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
+                        pdf.cell(w_utile * 0.25, 6, f"EUR {marca_da_bollo:.2f}  ", border=1, align='R', new_x="LMARGIN", new_y="NEXT")
                     pdf.set_font("Helvetica", "B", 10)
                     pdf.cell(w_utile * 0.75, 7, "  TOTALE DOVUTO", border=1, fill=True)
-                    pdf.cell(w_utile * 0.25, 7, f"E {totale_da_pagare:.2f}  ", border=1, fill=True, align='R', new_x="LMARGIN", new_y="NEXT")
+                    pdf.cell(w_utile * 0.25, 7, f"EUR {totale_da_pagare:.2f}  ", border=1, fill=True, align='R', new_x="LMARGIN", new_y="NEXT")
                     pdf.ln(6)
                     pdf.set_font("Helvetica", "I", 8)
                     pdf.multi_cell(w_utile, 4, "Operazione esente da IVA ai sensi dell'art. 10, comma 1, n. 18 del D.P.R. 633/1972. Spesa sanitaria detraibile con pagamento tracciabile.", new_x="LMARGIN", new_y="NEXT")
@@ -1580,46 +1807,46 @@ elif st.session_state["ruolo"] == "admin":
                 with col_btn_f1:
                     st.download_button("📥 Scarica Fattura Sanitaria (PDF)", crea_pdf_fattura(), file_name=f"Fattura_{num_fat}_{paz_fat['cognome']}.pdf", mime="application/pdf", type="primary", use_container_width=True)
                 with col_btn_f2:
-                    if st.button("💾 Registra Incasso nel Registro Economico", use_container_width=True):
+                    if st.button("💾 Registra Incasso nel Registro Economico", use_container_width=True, disabled=gia_registrata):
                         try:
                             supabase.table("movimenti_fiscali").insert({
                                 "descrizione": f"Fattura {num_fat} - {paz_fat['cognome']} {paz_fat['nome']} (CF: {paz_fat.get('codice_fiscale')})",
-                                "importo": totale_da_pagare,
+                                "importo": float(totale_da_pagare),
                                 "tipo": "ENTRATA",
                                 "data": str(data_fat),
                                 "metodo": metodo_pag
                             }).execute()
-                            st.success("Fattura archiviata nel registro delle entrate!")
-                            st.rerun()
+                            flash_rerun("Fattura archiviata nel registro delle entrate!")
                         except Exception as err:
                             st.error(f"Errore registrazione: {err}")
 
         with tab_sts:
-            st.markdown("#### 🏛️ Generatore Tracciato Sistema Tessera Sanitaria (MEF)")
-            try:
-                res_sts = supabase.table("movimenti_fiscali").select("*").filter("tipo", "eq", "ENTRATA").order("data").execute()
-                mov_entrate = res_sts.data or []
-            except Exception: mov_entrate = []
-
-        if mov_entrate:
-            righe_sts = []
-            for e in mov_entrate:
-                cf_estratto = "NON INDICATO"
-                if "CF:" in e["descrizione"]:
-                    cf_estratto = e["descrizione"].split("CF:")[1].replace(")", "").strip()
-                righe_sts.append({
-                    "Data Emissione": e["data"],
-                    "Numero Fattura / Descrizione": e["descrizione"],
-                    "Codice Fiscale Paziente": cf_estratto,
-                    "Importo Totale (€)": e["importo"],
-                    "Pagamento Tracciato": "Sì" if e.get("metodo") != "Contanti" else "No",
-                    "Tipo Spesa": "SP (Spesa Sanitaria)"
-                })
-            df_sts = pd.DataFrame(righe_sts)
-            st.dataframe(df_sts, use_container_width=True)
-            st.download_button("📥 Scarica Tracciato Spese Sistema TS (CSV)", df_sts.to_csv(index=False).encode('utf-8'), file_name=f"Tracciato_Sistema_TS_{date.today().year}.csv", mime="text/csv", type="primary")
-        else:
-            st.info("Nessuna fattura emessa registrata.")
+            st.markdown("#### 🏛️ Riepilogo spese sanitarie per il Sistema Tessera Sanitaria")
+            st.caption("File di lavoro (CSV) con le entrate registrate: non è il tracciato XML ufficiale del MEF, ma serve per il riepilogo e l'inserimento/caricamento dei dati.")
+            entrate = sorted([m for m in movs if m.get("tipo") == "ENTRATA"], key=lambda m: m["data"])
+            anni_sts = sorted({str(m["data"])[:4] for m in entrate}, reverse=True)
+            if entrate:
+                anno_sts = st.selectbox("Anno di riferimento:", anni_sts, key="anno_sts")
+                righe_sts = []
+                for e in entrate:
+                    if not str(e["data"]).startswith(anno_sts):
+                        continue
+                    righe_sts.append({
+                        "Data Emissione": e["data"],
+                        "Numero Fattura / Descrizione": e["descrizione"],
+                        "Codice Fiscale Paziente": estrai_cf(e["descrizione"]),
+                        "Importo Totale (€)": e["importo"],
+                        "Pagamento Tracciato": "Sì" if e.get("metodo") != "Contanti" else "No",
+                        "Tipo Spesa": "SP (Spesa Sanitaria)"
+                    })
+                df_sts = pd.DataFrame(righe_sts)
+                n_senza_cf = int((df_sts["Codice Fiscale Paziente"] == "NON INDICATO").sum())
+                if n_senza_cf:
+                    st.warning(f"{n_senza_cf} entrate senza Codice Fiscale del paziente: non sono utilizzabili per il Sistema TS.")
+                st.dataframe(df_sts, use_container_width=True)
+                st.download_button("📥 Scarica Riepilogo Spese Sistema TS (CSV)", df_sts.to_csv(index=False).encode('utf-8-sig'), file_name=f"Riepilogo_Sistema_TS_{anno_sts}.csv", mime="text/csv", type="primary")
+            else:
+                st.info("Nessuna fattura emessa registrata.")
 
         with tab_registro:
             c_form, c_metriche = st.columns([1.1, 2.3])
@@ -1627,55 +1854,58 @@ elif st.session_state["ruolo"] == "admin":
                 st.markdown("#### ➕ Registra Spesa / Entrata Manuale")
                 with st.form("form_trans_manuale", clear_on_submit=True):
                     tipo = st.selectbox("Tipologia", ["Incasso Visita (Entrata)", "Spesa Studio Deducibile (Uscita)"])
+                    paz_mov = st.selectbox("Paziente (per gli incassi)", ["--"] + [f"{p['cognome']} {p['nome']} (CF: {p.get('codice_fiscale') or 'N/D'})" for p in pazienti_list])
                     desc = st.text_input("Descrizione", placeholder="Es: Quota Ordine, Software, Carta lettino...")
                     val = st.number_input("Importo (€)", min_value=1.0, value=90.0, step=5.0)
-                    data_m = st.date_input("Data Movimento", value=date.today())
+                    data_m = st.date_input("Data Movimento", value=oggi())
                     met = st.selectbox("Metodo Pagamento", ["POS / Carta", "Bonifico Bancario", "Contanti"])
                     if st.form_submit_button("Salva Movimento", type="primary"):
                         is_e = "Entrata" in tipo
-                        try:
-                            supabase.table("movimenti_fiscali").insert({
-                                "descrizione": desc, "importo": val if is_e else -val,
-                                "tipo": "ENTRATA" if is_e else "USCITA", "data": str(data_m), "metodo": met
-                            }).execute()
-                            st.success("Registrato!")
-                            st.rerun()
-                        except Exception as err:
-                            st.error(f"Errore: {err}")
+                        if not desc.strip():
+                            st.error("Inserisci una descrizione.")
+                        else:
+                            descr_finale = desc.strip()
+                            if is_e and paz_mov != "--" and "(CF:" not in descr_finale:
+                                descr_finale += " " + paz_mov[paz_mov.index("(CF:"):]
+                            try:
+                                supabase.table("movimenti_fiscali").insert({
+                                    "descrizione": descr_finale, "importo": val if is_e else -val,
+                                    "tipo": "ENTRATA" if is_e else "USCITA", "data": str(data_m), "metodo": met
+                                }).execute()
+                                flash_rerun("Registrato!")
+                            except Exception as err:
+                                st.error(f"Errore: {err}")
 
-        with c_metriche:
-            movs = []
-            try:
-                res_m = supabase.table("movimenti_fiscali").select("*").order("data", desc=True).execute()
-                movs = res_m.data or []
-            except Exception: movs = []
-                
-            if movs:
-                df_m = pd.DataFrame(movs)
-                tot_in = df_m[df_m["importo"] > 0]["importo"].sum()
-                tot_out = abs(df_m[df_m["importo"] < 0]["importo"].sum())
-                utile = tot_in - tot_out
-                enpab = tot_in * 0.04
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Totale Incassi", f"€ {tot_in:,.2f}")
-                m2.metric("Spese Totali", f"€ {tot_out:,.2f}")
-                m3.metric("Utile Netto", f"€ {utile:,.2f}")
-                m4.metric("Rivalsa ENPAB (4%)", f"€ {enpab:,.2f}")
-                st.markdown("---")
-                st.markdown("#### 📋 Registro Movimenti")
-                for m in movs:
-                    c_d, c_desc, c_imp, c_met, c_canc = st.columns([1.3, 3, 1.3, 1.8, 1])
-                    c_d.write(f"📅 `{m['data']}`")
-                    c_desc.write(f"**{m['descrizione']}**")
-                    colore_imp = "green" if m["importo"] > 0 else "red"
-                    c_imp.markdown(f"<span style='color:{colore_imp}; font-weight:700;'>€ {float(m['importo']):.2f}</span>", unsafe_allow_html=True)
-                    c_met.write(f"_{m.get('metodo') or 'N/D'}_")
-                    if c_canc.button("🗑️", key=f"del_mov_{m['id']}", help="Elimina"):
-                        supabase.table("movimenti_fiscali").delete().eq("id", m["id"]).execute()
-                        st.success("Eliminato!")
-                        st.rerun()
-            else:
-                st.info("Nessun movimento presente nel registro.")
+            with c_metriche:
+                anni_reg = sorted({str(m["data"])[:4] for m in movs}, reverse=True)
+                anno_reg = st.selectbox("Periodo:", ["Tutti"] + anni_reg, key="anno_reg") if movs else "Tutti"
+                movs_f = [m for m in movs if anno_reg == "Tutti" or str(m["data"]).startswith(anno_reg)]
+
+                if movs_f:
+                    tot_in = sum(float(m["importo"]) for m in movs_f if float(m["importo"]) > 0)
+                    tot_out = abs(sum(float(m["importo"]) for m in movs_f if float(m["importo"]) < 0))
+                    utile = tot_in - tot_out
+                    incassi_fatture = sum(float(m["importo"]) for m in movs_f if float(m["importo"]) > 0 and (m.get("descrizione") or "").startswith("Fattura "))
+                    enpab = enpab_contenuta_negli_incassi(incassi_fatture)
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Totale Incassi", f"€ {tot_in:,.2f}")
+                    m2.metric("Spese Totali", f"€ {tot_out:,.2f}")
+                    m3.metric("Differenza Incassi-Spese", f"€ {utile:,.2f}", help="Al lordo di imposte, contributi e marche da bollo.")
+                    m4.metric("ENPAB inclusa nelle fatture", f"€ {enpab:,.2f}", help="Quota del 4% già compresa nel totale delle fatture emesse.")
+                    st.markdown("---")
+                    st.markdown("#### 📋 Registro Movimenti")
+                    for m in movs_f:
+                        c_d, c_desc, c_imp, c_met, c_canc = st.columns([1.3, 3, 1.3, 1.8, 1])
+                        c_d.write(f"📅 `{m['data']}`")
+                        c_desc.write(f"**{m['descrizione']}**")
+                        colore_imp = "green" if m["importo"] > 0 else "red"
+                        c_imp.markdown(f"<span style='color:{colore_imp}; font-weight:700;'>€ {float(m['importo']):.2f}</span>", unsafe_allow_html=True)
+                        c_met.write(f"_{m.get('metodo') or 'N/D'}_")
+                        if c_canc.button("🗑️", key=f"del_mov_{m['id']}", help="Elimina"):
+                            supabase.table("movimenti_fiscali").delete().eq("id", m["id"]).execute()
+                            flash_rerun("Eliminato!")
+                else:
+                    st.info("Nessun movimento presente nel registro.")
 
     # -------------------------------------------------------------------------------------------------
     # 7. BACKUP & DISASTER RECOVERY (MEDICO)
@@ -1691,14 +1921,14 @@ elif st.session_state["ruolo"] == "admin":
                 "esami_laboratorio", "scadenze", "movimenti_fiscali", 
                 "template_diete", "template_voci_dieta"
             ]
+            errori = []
             
             with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zf:
                 for tab in tabelle:
                     try:
-                        res_t = supabase.table(tab).select("*").execute()
-                        dati_tab = res_t.data or []
+                        dati_tab = fetch_all(supabase, tab, "*")  # paginato: nessun troncamento a 1000 righe
                         
-                        json_str = json.dumps(dati_tab, indent=2, default=str)
+                        json_str = json.dumps(dati_tab, indent=2, default=str, ensure_ascii=False)
                         zf.writestr(f"{tab}.json", json_str)
                         
                         if dati_tab:
@@ -1706,21 +1936,28 @@ elif st.session_state["ruolo"] == "admin":
                             csv_str = df_tab.to_csv(index=False)
                             zf.writestr(f"{tab}.csv", csv_str)
                     except Exception as err:
+                        errori.append(f"{tab}: {err}")
                         zf.writestr(f"{tab}_errore.txt", str(err))
 
-            buffer_zip.seek(0)
-            return buffer_zip.getvalue()
+            return buffer_zip.getvalue(), errori
 
+        st.warning("🔒 L'archivio contiene dati sanitari in chiaro: conservalo su un supporto cifrato e non inviarlo via email.")
         col_bk1, col_bk2 = st.columns([1.5, 2])
         with col_bk1:
             st.write("")
-            st.download_button(
-                label="📦 Scarica Archivio Backup Completo (.ZIP)",
-                data=genera_archivio_backup(),
-                file_name=f"Backup_Studio_Nutrizione_{date.today().strftime('%Y%m%d')}.zip",
-                mime="application/zip",
-                type="primary",
-                use_container_width=True
-            )
+            if st.button("⚙️ Prepara Backup Completo", type="primary", use_container_width=True):
+                with st.spinner("Estrazione di tutte le tabelle in corso..."):
+                    st.session_state["_backup"] = genera_archivio_backup()
+            if "_backup" in st.session_state:
+                dati_zip, errori_bk = st.session_state["_backup"]
+                if errori_bk:
+                    st.error("Backup INCOMPLETO. Tabelle non estratte: " + "; ".join(errori_bk))
+                st.download_button(
+                    label="📦 Scarica Archivio Backup (.ZIP)",
+                    data=dati_zip,
+                    file_name=f"Backup_Studio_Nutrizione_{oggi().strftime('%Y%m%d')}.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
         with col_bk2:
-            st.info("L'archivio ZIP include sia i file JSON completi per il ripristino tecnico sia i file CSV compatibili con Microsoft Excel / Google Sheets.")
+            st.info("L'archivio ZIP include sia i file JSON completi per il ripristino tecnico sia i file CSV compatibili con Microsoft Excel / Google Sheets. Il backup viene generato solo su richiesta.")
